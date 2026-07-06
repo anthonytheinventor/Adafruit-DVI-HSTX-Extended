@@ -24,11 +24,17 @@ I wanted higher resolution for data displays and dashboards — enough pixels to
 ## What's different
 
 - **`MODE_PALETTE4`**: a new 4bpp indexed-color driver mode, 16 colors, 2 pixels per byte. Half the RAM of the existing 8bpp palette mode at the same resolution.
+
 - **`DVHSTX4`**: a new Arduino-facing canvas class for that mode. Built directly on packed-nibble storage rather than a `GFXcanvas8`/`GFXcanvas16` subclass, since Adafruit_GFX has no native 4-bit canvas. Same API shape as `DVHSTX8`/`DVHSTX16` — `setColor()`, `drawPixel()`/`getPixel()`, double-buffered `swap()`.
+  
 - **Native 720x480** (`DVHSTX_RESOLUTION_720x480`), using real CEA-861 NTSC timing pulled from an actual display's EDID and verified on hardware. This is a genuine full-resolution mode, not the pixel-doubled 720x480 you get from `DVHSTX_RESOLUTION_360x240` — and it only fits in RAM at 4bpp.
+  
 - **Palette lookup caching**: `rebuild_palette4_cache()` precomputes two 256-entry lookup tables so the DMA scanline path is a straight lookup per pixel, no bit-shifting. Runs automatically on `init()` and on `DVHSTX4::setColor()`.
+  
 - **Safer frame buffer allocation**: `malloc()` failures are now checked and handled instead of silently continuing with a null buffer.
-- **Faster `MODE_PALETTE4` DMA path**: the scanline fill reads the framebuffer 4 bytes at a time instead of 1, and the lookup tables now live in Scratch Y RAM so they're not fighting the DMA controller for bus access on the same memory banks.
+  
+- **Faster `MODE_PALETTE4` DMA path**: the scanline fill reads the framebuffer 4 bytes at a time instead of 1, and the lookup tables live in Scratch Y RAM so they're not fighting the DMA controller for bus access on the same memory banks.
+  
 - **Two new examples**: `03_4bpp_test` and `04_720x480_test`.
 
 ## Installing from the zip file

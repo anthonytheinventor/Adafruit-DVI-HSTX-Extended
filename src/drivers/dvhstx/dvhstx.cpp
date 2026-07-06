@@ -29,6 +29,17 @@ extern "C" {
 
 using namespace pimoroni;
 
+// MODE_PALETTE4 lookup tables, indexed by the packed byte (not the nibble)
+// so the DMA handler does one lookup per pixel, no shifting. Forced into
+// Scratch Y (a dedicated, non-striped 4KB SRAM bank) rather than left as
+// class members in the default data segment, so the DMA ISR's per-pixel
+// reads here don't contend on the bus with the DMA controller's own
+// concurrent reads from the striped SRAM banks (where line_buffers and
+// frame_buffer_display/back live). Same idea as gfx_dma_handler() itself
+// being placed in Scratch X below, just for data instead of code.
+static uint32_t __scratch_y("palette4") palette4_hi[256];
+static uint32_t __scratch_y("palette4") palette4_lo[256];
+
 #ifdef MICROPY_BUILD_TYPE
 #define FRAME_BUFFER_SIZE (640*360)
 __attribute__((section(".uninitialized_data"))) static uint8_t frame_buffer_a[FRAME_BUFFER_SIZE];
@@ -167,7 +178,103 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
             line_num = new_line_num;
             uint32_t* dst_ptr = &line_buffers[line_num * line_buf_total_len + count_of(vactive_line_header)];
 
-            if (line_bytes_per_pixel == 2) {
+            if (mode == MODE_PALETTE4) {
+                // checked ahead of line_bytes_per_pixel below since this
+                // mode also uses 4 there for line-buffer sizing (see init).
+                // each byte = 2 pixels, hi nibble = left, lo = right.
+                // palette4_hi/lo are indexed by the whole byte and already
+                // have the nibble split + palette lookup baked in, so this
+                // is just a read + 2 lookups + N stores, no shifting.
+                //
+                // Read 4 packed bytes (8 raw pixels) at a time instead of
+                // one byte at a time: fewer load instructions and fewer
+                // loop iterations for the same output. Safe because every
+                // supported DVHSTXResolution width is a multiple of 8
+                // pixels, so a MODE_PALETTE4 row (width/2 bytes) is always
+                // a whole number of 4-byte words -- no leftover bytes to
+                // special-case, and frame_buffer_display's row start is
+                // always 4-byte aligned as a result.
+                uint32_t* src_ptr_32 = (uint32_t*)&frame_buffer_display[y * (((timing_mode->h_active_pixels >> h_repeat_shift) + 1) >> 1)];
+                uint32_t* dst_end = dst_ptr + timing_mode->h_active_pixels;
+                if (h_repeat_shift == 2) {
+                    while (dst_ptr < dst_end) {
+                        uint32_t packed_word = *src_ptr_32++;
+
+                        uint8_t p0 = packed_word & 0xFF;
+                        uint32_t val_hi = palette4_hi[p0], val_lo = palette4_lo[p0];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+
+                        uint8_t p1 = (packed_word >> 8) & 0xFF;
+                        val_hi = palette4_hi[p1]; val_lo = palette4_lo[p1];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+
+                        uint8_t p2 = (packed_word >> 16) & 0xFF;
+                        val_hi = palette4_hi[p2]; val_lo = palette4_lo[p2];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+
+                        uint8_t p3 = (packed_word >> 24) & 0xFF;
+                        val_hi = palette4_hi[p3]; val_lo = palette4_lo[p3];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+                    }
+                } else if (h_repeat_shift == 1) {
+                    while (dst_ptr < dst_end) {
+                        uint32_t packed_word = *src_ptr_32++;
+
+                        uint8_t p0 = packed_word & 0xFF;
+                        uint32_t val_hi = palette4_hi[p0], val_lo = palette4_lo[p0];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+
+                        uint8_t p1 = (packed_word >> 8) & 0xFF;
+                        val_hi = palette4_hi[p1]; val_lo = palette4_lo[p1];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+
+                        uint8_t p2 = (packed_word >> 16) & 0xFF;
+                        val_hi = palette4_hi[p2]; val_lo = palette4_lo[p2];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+
+                        uint8_t p3 = (packed_word >> 24) & 0xFF;
+                        val_hi = palette4_hi[p3]; val_lo = palette4_lo[p3];
+                        *dst_ptr++ = val_hi; *dst_ptr++ = val_hi;
+                        *dst_ptr++ = val_lo; *dst_ptr++ = val_lo;
+                    }
+                } else {
+                    while (dst_ptr < dst_end) {
+                        uint32_t packed_word = *src_ptr_32++;
+
+                        uint8_t p0 = packed_word & 0xFF;
+                        *dst_ptr++ = palette4_hi[p0];
+                        *dst_ptr++ = palette4_lo[p0];
+
+                        uint8_t p1 = (packed_word >> 8) & 0xFF;
+                        *dst_ptr++ = palette4_hi[p1];
+                        *dst_ptr++ = palette4_lo[p1];
+
+                        uint8_t p2 = (packed_word >> 16) & 0xFF;
+                        *dst_ptr++ = palette4_hi[p2];
+                        *dst_ptr++ = palette4_lo[p2];
+
+                        uint8_t p3 = (packed_word >> 24) & 0xFF;
+                        *dst_ptr++ = palette4_hi[p3];
+                        *dst_ptr++ = palette4_lo[p3];
+                    }
+                }
+            }
+            else if (line_bytes_per_pixel == 2) {
                 uint16_t* src_ptr = (uint16_t*)&frame_buffer_display[y * 2 * (timing_mode->h_active_pixels >> h_repeat_shift)];
                 if (h_repeat_shift == 2) {
                     for (int i = 0; i < timing_mode->h_active_pixels >> 1; i += 2) {
@@ -490,6 +597,19 @@ RGB888* DVHSTX::get_palette()
     return palette;
 }
 
+void DVHSTX::rebuild_palette4_cache()
+{
+    // not a hot path, so disabling interrupts here is cheap. keeps the DMA
+    // ISR from reading this table mid-rebuild and getting a stale color
+    // for a frame.
+    uint32_t intr_stash = save_and_disable_interrupts();
+    for (int b = 0; b < 256; b++) {
+        palette4_hi[b] = palette[b >> 4];
+        palette4_lo[b] = palette[b & 0x0F];
+    }
+    restore_interrupts(intr_stash);
+}
+
 DVHSTX::DVHSTX()
 {
     // Always use the bottom channels
@@ -641,28 +761,59 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, bool double_buffe
         frame_bytes_per_pixel = 2;
         line_bytes_per_pixel = 14;
         break;
+    case MODE_PALETTE4:
+        // 2 pixels/byte, so frame_bytes_per_pixel can't really be "0.5" --
+        // left at 1, buffer size below is special-cased instead.
+        // line_bytes_per_pixel stays 4 since the DMA output is still a
+        // full RGB word per pixel; mode is checked directly to tell this
+        // apart from MODE_PALETTE.
+        frame_bytes_per_pixel = 1;
+        line_bytes_per_pixel = 4;
+        break;
     default:
         dvhstx_debug("Unsupported mode %d", (int)mode);
         return false;
     }
 
+    // bytes needed for one framebuffer. same as width*height*bpp except
+    // for MODE_PALETTE4, which packs 2 pixels per byte.
+    const uint32_t framebuffer_bytes = (mode == MODE_PALETTE4)
+        ? ((uint32_t)frame_width * frame_height + 1) / 2
+        : (uint32_t)frame_width * frame_height * frame_bytes_per_pixel;
+
 #ifdef MICROPY_BUILD_TYPE
-    if (frame_width * frame_height * frame_bytes_per_pixel > sizeof(frame_buffer_a)) {
+    if (framebuffer_bytes > sizeof(frame_buffer_a)) {
         panic("Frame buffer too large");
     }
 
     frame_buffer_display = frame_buffer_a;
     frame_buffer_back = double_buffered ? frame_buffer_b : frame_buffer_a;
 #else
-    frame_buffer_display = (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel);
-    frame_buffer_back = double_buffered ? (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel) : frame_buffer_display;
+    frame_buffer_display = (uint8_t*)malloc(framebuffer_bytes);
+    frame_buffer_back = double_buffered ? (uint8_t*)malloc(framebuffer_bytes) : frame_buffer_display;
+    if (!frame_buffer_display || !frame_buffer_back) {
+        dvhstx_debug("Failed to allocate frame buffer(s) (%lu bytes each)\n",
+                     (unsigned long)framebuffer_bytes);
+        // free whatever did succeed so we don't leak on failure
+        if (frame_buffer_display) free(frame_buffer_display);
+        if (double_buffered && frame_buffer_back && frame_buffer_back != frame_buffer_display) free(frame_buffer_back);
+        frame_buffer_display = nullptr;
+        frame_buffer_back = nullptr;
+        return false;
+    }
 #endif
-    memset(frame_buffer_display, 0, frame_width * frame_height * frame_bytes_per_pixel);
-    memset(frame_buffer_back, 0, frame_width * frame_height * frame_bytes_per_pixel);
+    memset(frame_buffer_display, 0, framebuffer_bytes);
+    memset(frame_buffer_back, 0, framebuffer_bytes);
 
     memset(palette, 0, PALETTE_SIZE * sizeof(palette[0]));
 
-    frame_buffer_display = frame_buffer_display;
+    // needs to happen after the palette is zeroed but before
+    // dma_channel_start() below, since that's what arms the ISR that
+    // reads palette4_hi/lo every scanline.
+    if (mode == MODE_PALETTE4) {
+        rebuild_palette4_cache();
+    }
+
     dvhstx_debug("Frame buffers inited\n");
 
     const bool is_text_mode = (mode == MODE_TEXT_MONO || mode == MODE_TEXT_RGB111);
@@ -735,6 +886,9 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, bool double_buffe
             0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
         break;
 
+    case MODE_PALETTE4:
+        // falls through -- by the time data hits HSTX it's already been
+        // expanded to full RGB words, same as MODE_PALETTE
     case MODE_PALETTE:
         // Configure HSTX's TMDS encoder for RGB888
         hstx_ctrl_hw->expand_tmds =
@@ -931,7 +1085,15 @@ void DVHSTX::flip_blocking() {
 void DVHSTX::flip_now() {
     if (get_single_buffered())
         return;
-    std::swap(frame_buffer_display, frame_buffer_back);
+    // Plain manual swap instead of std::swap() -- template argument
+    // deduction with volatile-qualified lvalues is a known rough edge
+    // across compiler/library versions, and there's no reason to risk it
+    // when ordinary assignment (unambiguously well-defined for volatile
+    // variables -- that's the whole point of the qualifier) does exactly
+    // the same thing.
+    uint8_t* tmp = frame_buffer_display;
+    frame_buffer_display = frame_buffer_back;
+    frame_buffer_back = tmp;
 }
 
 void DVHSTX::wait_for_vsync() {

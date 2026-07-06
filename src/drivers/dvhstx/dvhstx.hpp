@@ -17,18 +17,23 @@ namespace pimoroni {
   typedef uint32_t RGB888;
 
   // Digital Video using HSTX
-  // Valid screen modes are:
-  //   Pixel doubled: 640x480 (60Hz), 720x480 (60Hz), 720x400 (70Hz), 720x576 (50Hz), 
-  //                  800x600 (60Hz), 800x480 (60Hz), 800x450 (60Hz), 960x540 (60Hz), 1024x768 (60Hz)
-  //   Pixel doubled or quadrupled: 1280x720 (50Hz)
+  // Screen modes:
+  //   Pixel doubled: 640x480, 720x480, 720x400, 720x576, 800x600, 800x480,
+  //                  800x450, 960x540, 1024x768 (all 60Hz except noted)
+  //   Doubled or quadrupled: 1280x720 (50Hz)
   //
-  // Giving valid resolutions:
-  //   320x180, 640x360 (well supported, square pixels on a 16:9 display)
-  //   480x270, 400x225 (sometimes supported, square pixels on a 16:9 display)
-  //   320x240, 360x240, 360x200, 360x288, 400x300, 512x384 (well supported, but pixels aren't square)
-  //   400x240 (sometimes supported, pixels aren't square)
+  // Resolutions:
+  //   320x180, 640x360 (square pixels, 16:9)
+  //   480x270, 400x225 (square pixels, 16:9, less common support)
+  //   320x240, 360x240, 360x200, 360x288, 400x300, 512x384 (pixels not square)
+  //   400x240 (pixels not square, less common support)
+  //   720x480 native, 4:3, no doubling (MODE_PALETTE4 only -- different
+  //   from the doubled 360x240->720x480 above)
   //
-  // Note that the double buffer is in RAM, so 640x360 uses almost all of the available RAM.
+  // MODE_PALETTE4: 4bpp, 16 colors, 2 pixels per byte. Half the RAM of
+  // MODE_PALETTE at the same resolution.
+  //
+  // Double buffering uses RAM, so e.g. 640x360 uses almost all of it.
   class DVHSTX {
   public:
     static constexpr int PALETTE_SIZE = 256;
@@ -40,6 +45,9 @@ namespace pimoroni {
       MODE_RGB888 = 3,
       MODE_TEXT_MONO = 4,
       MODE_TEXT_RGB111 = 5,
+      MODE_PALETTE4 = 6, ///< 4bpp, 2 pixels/byte (high nibble = left,
+                         ///< low nibble = right). Same palette as
+                         ///< MODE_PALETTE, indices 0-15 only.
     };
 
     enum TextColour {
@@ -104,6 +112,11 @@ namespace pimoroni {
       bool init(uint16_t width, uint16_t height, Mode mode, bool double_buffered, const DVHSTXPinout &pinout);
       void reset();
 
+      // Rebuilds the MODE_PALETTE4 lookup tables from the palette. Runs
+      // automatically in init() and in DVHSTX4's setColor(); call it
+      // yourself only if you write to get_palette() directly.
+      void rebuild_palette4_cache();
+
       // Wait for vsync and then flip the buffers
       void flip_blocking();
 
@@ -126,8 +139,16 @@ namespace pimoroni {
 
     private:
       RGB888 palette[PALETTE_SIZE];
-      uint8_t* frame_buffer_display;
-      uint8_t* frame_buffer_back;
+      // MODE_PALETTE4 lookup tables now live as Scratch Y globals in
+      // dvhstx.cpp (see palette4_hi/palette4_lo there) instead of class
+      // members, to keep the DMA ISR's hot reads off the striped SRAM
+      // banks the DMA controller itself is contending for.
+      // volatile: swap() writes these on the main thread, the DMA ISR
+      // reads them every scanline. It's the pointer that's volatile, not
+      // the data it points to -- only one side touches a given buffer's
+      // pixels at a time.
+      uint8_t* volatile frame_buffer_display;
+      uint8_t* volatile frame_buffer_back;
       uint32_t* font_cache = nullptr;
 
       void display_setup_clock();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string.h> // memset, used by DVHSTX4::fillScreen
+
 #include "Adafruit_GFX.h"
 
 #include "drivers/dvhstx/dvhstx.hpp"
@@ -31,6 +33,14 @@ struct enum {
                                    ///< resolution 640x480@60Hz
         DVHSTX_RESOLUTION_360x240, ///< well supported, aspect ratio 3:2, actual
                                    ///< resolution 720x480@60Hz
+        DVHSTX_RESOLUTION_720x480, ///< well supported (CEA-861 NTSC
+                                   ///< timing), aspect ratio 4:3, native
+                                   ///< resolution -- not doubled, unlike
+                                   ///< the 720x480 you get from
+                                   ///< DVHSTX_RESOLUTION_360x240 above.
+                                   ///< Many TVs show this as 4:3 by
+                                   ///< default; use the TV's own stretch
+                                   ///< setting for 16:9.
         DVHSTX_RESOLUTION_360x200, ///< well supported, aspect ratio 9:5, actual
                                    ///< resolution 720x400@70Hz (very close to
                                    ///< 16:9)
@@ -262,6 +272,268 @@ private:
   DVHSTXResolution res;
   mutable pimoroni::DVHSTX hstx;
   bool double_buffered;
+};
+
+/// 4-bit (16-color) canvas for DVI output.
+///
+/// Not built on GFXcanvas8/16 like the other classes here -- Adafruit_GFX
+/// doesn't have a 4-bit canvas, so pixel read/write is done directly.
+/// Two pixels per byte: high nibble = left, low nibble = right. Same
+/// 256-entry palette format as DVHSTX8, but only 0-15 are usable.
+class DVHSTX4 : public Adafruit_GFX {
+public:
+  /**************************************************************************/
+  /*!
+     @brief    Instatiate a DVHSTX 4-bit (16-color) canvas context for graphics
+     @param    pinout Details of the HSTX pinout
+     @param    res   Display resolution
+     @param    double_buffered Whether to allocate two buffers
+  */
+  /**************************************************************************/
+  DVHSTX4(DVHSTXPinout pinout, DVHSTXResolution res,
+          bool double_buffered = false)
+      : Adafruit_GFX(dvhstx_width(res), dvhstx_height(res)),
+        pinout(pinout), res{res}, double_buffered{double_buffered} {}
+  ~DVHSTX4() { end(); }
+
+  /**************************************************************************/
+  /*!
+     @brief    Start the display
+     @return   true if successful, false in case of error
+  */
+  /**************************************************************************/
+  bool begin() {
+    bool result =
+        hstx.init(dvhstx_width(res), dvhstx_height(res),
+                  pimoroni::DVHSTX::MODE_PALETTE4, double_buffered, pinout);
+    if (!result)
+      return false;
+    // default palette: black at 0, white at 15, ramp between. writes it
+    // directly and rebuilds the cache once instead of going through
+    // setColor() 16 times.
+    for (int i = 0; i < 16; i++) {
+      uint8_t v = i * 255 / 15;
+      hstx.get_palette()[i] = ((uint32_t)v << 16) | ((uint32_t)v << 8) | v;
+    }
+    hstx.rebuild_palette4_cache();
+    buffer = hstx.get_back_buffer<uint8_t>();
+    fillScreen(0);
+    return true;
+  }
+  /**************************************************************************/
+  /*!
+     @brief    Stop the display
+  */
+  /**************************************************************************/
+  void end() { hstx.reset(); }
+
+  /**************************************************************************/
+  /*!
+     @brief    Set the given palette entry to a RGB888 color
+     @param idx The palette entry number, from 0 to 15 (values above 15
+     are masked off, since only the low nibble is ever used as an index)
+     @param r The input red value, 0 to 255
+     @param g The input green value, 0 to 255
+     @param b The input blue value, 0 to 255
+  */
+  /**************************************************************************/
+  void setColor(uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
+    hstx.get_palette()[idx & 0x0F] =
+        ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+    hstx.rebuild_palette4_cache();
+  }
+  /**************************************************************************/
+  /*!
+     @brief    Set the given palette entry to a RGB888 color
+     @param idx The palette entry number, from 0 to 15
+     @param rgb The 24-bit RGB value in the form 0x00RRGGBB
+  */
+  /**************************************************************************/
+  void setColor(uint8_t idx, uint32_t rgb) {
+    hstx.get_palette()[idx & 0x0F] = rgb;
+    hstx.rebuild_palette4_cache();
+  }
+
+  /**********************************************************************/
+  /*!
+    @brief    If double-buffered, wait for retrace and swap buffers. Otherwise,
+    do nothing (returns immediately)
+    @param copy_framebuffer if true, copy the new screen to the new back buffer.
+    Otherwise, the content is undefined.
+  */
+  /**********************************************************************/
+  void swap(bool copy_framebuffer = false);
+
+  /**************************************************************************/
+  /*!
+     @brief    Set one pixel's 4-bit palette index (0-15; values above 15
+     are masked off)
+     @param x  Horizontal position
+     @param y  Vertical position
+     @param color  Palette index, 0-15
+  */
+  /**************************************************************************/
+  void drawPixel(int16_t x, int16_t y, uint16_t color) override {
+    if (!buffer)
+      return;
+    if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height))
+      return;
+
+    // same rotation transform Adafruit_GFX canvases use
+    int16_t t;
+    switch (rotation) {
+    case 1:
+      t = x;
+      x = WIDTH - 1 - y;
+      y = t;
+      break;
+    case 2:
+      x = WIDTH - 1 - x;
+      y = HEIGHT - 1 - y;
+      break;
+    case 3:
+      t = x;
+      x = y;
+      y = HEIGHT - 1 - t;
+      break;
+    }
+
+    uint32_t byteIdx = (uint32_t)(x >> 1) + (uint32_t)y * ((WIDTH + 1) >> 1);
+    uint8_t nib = color & 0x0F;
+    if (x & 1) {
+      buffer[byteIdx] = (buffer[byteIdx] & 0xF0) | nib;
+    } else {
+      buffer[byteIdx] = (buffer[byteIdx] & 0x0F) | (nib << 4);
+    }
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Read back one pixel's 4-bit palette index
+     @param x  Horizontal position
+     @param y  Vertical position
+     @return   Palette index, 0-15, or 0 if out of bounds / not started
+  */
+  /**************************************************************************/
+  uint8_t getPixel(int16_t x, int16_t y) const {
+    if (!buffer)
+      return 0;
+    if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height))
+      return 0;
+
+    int16_t t;
+    switch (rotation) {
+    case 1:
+      t = x;
+      x = WIDTH - 1 - y;
+      y = t;
+      break;
+    case 2:
+      x = WIDTH - 1 - x;
+      y = HEIGHT - 1 - y;
+      break;
+    case 3:
+      t = x;
+      x = y;
+      y = HEIGHT - 1 - t;
+      break;
+    }
+
+    uint32_t byteIdx = (uint32_t)(x >> 1) + (uint32_t)y * ((WIDTH + 1) >> 1);
+    uint8_t byteVal = buffer[byteIdx];
+    return (x & 1) ? (byteVal & 0x0F) : (byteVal >> 4);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Fill the whole screen with one palette index
+     @param color  Palette index, 0-15
+  */
+  /**************************************************************************/
+  void fillScreen(uint16_t color) override {
+    if (!buffer)
+      return;
+    uint8_t nib = color & 0x0F;
+    uint8_t fillByte = (nib << 4) | nib;
+    uint32_t nbytes = ((uint32_t)WIDTH * HEIGHT + 1) / 2;
+    memset(buffer, fillByte, nbytes);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Fill a rectangle with one palette index (0-15; values above
+     15 are masked off). Fast-path override -- memsets whole bytes where
+     possible instead of going pixel-by-pixel.
+     @param x  Left edge
+     @param y  Top edge
+     @param w  Width
+     @param h  Height
+     @param color  Palette index, 0-15
+  */
+  /**************************************************************************/
+  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h,
+                uint16_t color) override {
+    if (!buffer)
+      return;
+    if (rotation != 0) {
+      // rotated fill isn't implemented, fall back to the generic path
+      Adafruit_GFX::fillRect(x, y, w, h, color);
+      return;
+    }
+
+    // clip to screen bounds, same as drawPixel() does per-pixel
+    if (x < 0) {
+      w += x;
+      x = 0;
+    }
+    if (y < 0) {
+      h += y;
+      y = 0;
+    }
+    if (x + w > _width)
+      w = _width - x;
+    if (y + h > _height)
+      h = _height - y;
+    if (w <= 0 || h <= 0)
+      return;
+
+    uint8_t nib = color & 0x0F;
+    uint8_t fillByte = (nib << 4) | nib;
+    uint32_t rowStrideBytes = (WIDTH + 1) >> 1;
+
+    for (int16_t row = y; row < y + h; row++) {
+      int16_t xEnd = x + w; // exclusive
+      int16_t col = x;
+
+      // leading partial byte -- only the low nibble is ours
+      if (col & 1) {
+        uint32_t byteIdx = (col >> 1) + (uint32_t)row * rowStrideBytes;
+        buffer[byteIdx] = (buffer[byteIdx] & 0xF0) | nib;
+        col++;
+      }
+
+      // fully-covered bytes, bulk memset
+      int16_t fullBytes = (xEnd - col) >> 1;
+      if (fullBytes > 0) {
+        uint32_t byteIdx = (col >> 1) + (uint32_t)row * rowStrideBytes;
+        memset(&buffer[byteIdx], fillByte, fullBytes);
+        col += fullBytes * 2;
+      }
+
+      // trailing partial byte -- only the high nibble is ours
+      if (col < xEnd) {
+        uint32_t byteIdx = (col >> 1) + (uint32_t)row * rowStrideBytes;
+        buffer[byteIdx] = (buffer[byteIdx] & 0x0F) | (nib << 4);
+      }
+    }
+  }
+
+private:
+  DVHSTXPinout pinout;
+  DVHSTXResolution res;
+  mutable pimoroni::DVHSTX hstx;
+  bool double_buffered;
+  uint8_t *buffer = nullptr;
 };
 
 using TextColor = pimoroni::DVHSTX::TextColour;

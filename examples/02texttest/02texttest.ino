@@ -1,6 +1,6 @@
 // Text mode demo
 // With apologies to Stanley Kubrick et al
-#include <Adafruit_dvhstx.h>
+#include <Adafruit_dvhstx_extended.h>
 
 #if defined(ADAFRUIT_FEATHER_RP2350_HSTX)
 DVHSTXPinout pinConfig = ADAFRUIT_FEATHER_RP2350_CFG;

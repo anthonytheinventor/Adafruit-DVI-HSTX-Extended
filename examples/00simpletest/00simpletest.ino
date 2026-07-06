@@ -1,6 +1,6 @@
 // 16-bit Adafruit_GFX-compatible framebuffer for RP2350 HSTX
 
-#include <Adafruit_dvhstx.h>
+#include <Adafruit_dvhstx_extended.h>
 
 
 #if defined(ADAFRUIT_FEATHER_RP2350_HSTX)

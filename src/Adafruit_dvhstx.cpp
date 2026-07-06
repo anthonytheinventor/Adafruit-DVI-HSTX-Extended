@@ -1,4 +1,4 @@
-#include "Adafruit_dvhstx.h"
+#include "Adafruit_dvhstx_extended.h"
 
 int16_t dvhstx_width(DVHSTXResolution r) {
   switch (r) {
@@ -17,6 +17,8 @@ int16_t dvhstx_width(DVHSTXResolution r) {
     return 640;
   case DVHSTX_RESOLUTION_360x240:
     return 360;
+  case DVHSTX_RESOLUTION_720x480:
+    return 720;
   case DVHSTX_RESOLUTION_360x200:
     return 360;
   case DVHSTX_RESOLUTION_720x400:
@@ -50,6 +52,8 @@ int16_t dvhstx_height(DVHSTXResolution r) {
     return 480;
   case DVHSTX_RESOLUTION_360x240:
     return 240;
+  case DVHSTX_RESOLUTION_720x480:
+    return 480;
   case DVHSTX_RESOLUTION_360x200:
     return 200;
   case DVHSTX_RESOLUTION_720x400:
@@ -84,6 +88,17 @@ void DVHSTX8::swap(bool copy_framebuffer) {
   if (copy_framebuffer) {
     memcpy(hstx.get_front_buffer<uint8_t>(), hstx.get_back_buffer<uint8_t>(),
            sizeof(uint8_t) * _width * _height);
+  }
+  buffer = hstx.get_back_buffer<uint8_t>();
+}
+void DVHSTX4::swap(bool copy_framebuffer) {
+  if (!double_buffered) {
+    return;
+  }
+  hstx.flip_blocking();
+  if (copy_framebuffer) {
+    memcpy(hstx.get_front_buffer<uint8_t>(), hstx.get_back_buffer<uint8_t>(),
+           ((uint32_t)_width * _height + 1) / 2);
   }
   buffer = hstx.get_back_buffer<uint8_t>();
 }

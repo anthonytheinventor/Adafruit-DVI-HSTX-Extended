@@ -1,5 +1,6 @@
 #######################################
-# Syntax Coloring Map for DVI HSTX library
+# Syntax Coloring Map for DVI HSTX Extended library
+# (fork of Adafruit's DVI HSTX library)
 #######################################
 
 #######################################

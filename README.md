@@ -7,7 +7,7 @@ This is my ([anthonytheinventor](https://github.com/anthonytheinventor)) fork of
 - [Introduction](#introduction)
 - [Why this fork exists](#why-this-fork-exists)
 - [What's different](#whats-different)
-- [Installing alongside the original Adafruit library from the zip file](#Installing from the zip file)
+- [Installing alongside the original Adafruit library from the zip file](#Installing-from-the-zip-file)
 - [Documentation](#documentation)
 
 ## Introduction

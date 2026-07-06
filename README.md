@@ -12,7 +12,7 @@ This is my ([anthonytheinventor](https://github.com/anthonytheinventor)) fork of
 
 ## Introduction
 
-DV HSTX lets you drive big, bold audio-visual projects over HDMI straight from Arduino.
+DVI HSTX lets you drive big, bold audio-visual projects over HDMI straight from Arduino.
 
 ![Text mode display](hstx-textmode.png)
 ![Graphics](hstx-graphicsmode.png)
@@ -34,6 +34,19 @@ I wanted higher resolution for data displays and dashboards — enough pixels to
 ## Installing alongside the original Adafruit library
 
 The main header is renamed from `Adafruit_dvhstx.h` to **`Adafruit_dvhstx_extended.h`**, so this fork can live alongside Adafruit's original without the Arduino IDE getting confused about which one to use. Sketches using this fork should `#include <Adafruit_dvhstx_extended.h>`.
+
+## Installing from the zip file
+
+1. Download the `Adafruit-DVI-HSTX-Extended.zip` file from the Releases page (don't unzip it).
+2. In the Arduino IDE, go to **Sketch → Include Library → Add .ZIP Library...**
+3. Select the zip file you downloaded and click **Open**.
+4. Restart the Arduino IDE if the examples don't show up right away.
+
+You'll then find the examples under **File → Examples → Adafruit DVI HSTX Extended**.
+
+This works alongside Adafruit's original `Adafruit_dvhstx` library if you have it
+installed too — just make sure your sketch includes
+`<Adafruit_dvhstx_extended.h>` rather than `<Adafruit_dvhstx.h>`.
 
 ## Documentation
 

@@ -34,8 +34,6 @@ This fork was built to fit a larger framebuffer into the RP2350's RAM budget. Ma
 
 The main header was renamed from `Adafruit_dvhstx.h` to **`Adafruit_dvhstx_extended.h`** specifically so this fork can be installed side by side with Adafruit's original `Adafruit_dvhstx` library without the Arduino IDE getting confused about which one to use. If you have both installed, sketches using this fork should `#include <Adafruit_dvhstx_extended.h>` rather than `#include <Adafruit_dvhstx.h>`.
 
-> **Note:** If you intend to submit this fork to the Arduino Library Manager, be aware that using "Adafruit" in the library name/metadata may run into naming/trademark review issues there, since it isn't an official Adafruit release. It's fine for a personal GitHub fork/install, but consider renaming for a Library Manager submission.
-
 ## Documentation
 
 See the examples in the `examples` folder. These examples should all work without changes on the Adafruit Feather RP2350, Adafruit Metro RP2350, and Adafruit Fruit Jam, as well as any other boards that define the HSTX pinout with preprocessor macros `PIN_CKP`, `PIN_D0P`, `PIN_D1P`, and `PIN_D2P`. If these are defined, then you can simply use `DVHSTX_PINOUT_DEFAULT`.

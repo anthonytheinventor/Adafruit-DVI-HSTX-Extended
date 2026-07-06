@@ -7,7 +7,7 @@ This is my ([anthonytheinventor](https://github.com/anthonytheinventor)) fork of
 - [Introduction](#introduction)
 - [Why this fork exists](#why-this-fork-exists)
 - [What's different](#whats-different)
-- [Installing alongside the original Adafruit library](#installing-alongside-the-original-adafruit-library)
+- [Installing alongside the original Adafruit library from the zip file](#Installing from the zip file)
 - [Documentation](#documentation)
 
 ## Introduction
@@ -30,10 +30,6 @@ I wanted higher resolution for data displays and dashboards — enough pixels to
 - **Safer frame buffer allocation**: `malloc()` failures are now checked and handled instead of silently continuing with a null buffer.
 - **Faster `MODE_PALETTE4` DMA path**: the scanline fill reads the framebuffer 4 bytes at a time instead of 1, and the lookup tables now live in Scratch Y RAM so they're not fighting the DMA controller for bus access on the same memory banks.
 - **Two new examples**: `03_4bpp_test` and `04_720x480_test`.
-
-## Installing alongside the original Adafruit library
-
-The main header is renamed from `Adafruit_dvhstx.h` to **`Adafruit_dvhstx_extended.h`**, so this fork can live alongside Adafruit's original without the Arduino IDE getting confused about which one to use. Sketches using this fork should `#include <Adafruit_dvhstx_extended.h>`.
 
 ## Installing from the zip file
 

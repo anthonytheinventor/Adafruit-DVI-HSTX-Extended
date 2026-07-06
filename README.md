@@ -35,8 +35,6 @@ I wanted higher resolution for data displays and dashboards — enough pixels to
 
 The main header is renamed from `Adafruit_dvhstx.h` to **`Adafruit_dvhstx_extended.h`**, so this fork can live alongside Adafruit's original without the Arduino IDE getting confused about which one to use. Sketches using this fork should `#include <Adafruit_dvhstx_extended.h>`.
 
-> **Note:** If you ever submit this to the Arduino Library Manager, keep in mind "Adafruit" in the name may raise trademark flags there since this isn't an official release. Fine for a personal fork/install, just something to consider for a Library Manager submission.
-
 ## Documentation
 
 See the examples in the `examples` folder — they should work unmodified on the Adafruit Feather RP2350, Metro RP2350, and Fruit Jam, or any board that defines `PIN_CKP`, `PIN_D0P`, `PIN_D1P`, and `PIN_D2P`. If those are defined, just use `DVHSTX_PINOUT_DEFAULT`.

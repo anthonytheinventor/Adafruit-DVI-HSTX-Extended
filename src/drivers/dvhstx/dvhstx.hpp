@@ -6,6 +6,12 @@
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 
+// HSTX only exists on the RP2350. Note ARDUINO_ARCH_RP2040 is defined for
+// both chips, so check PICO_RP2350 instead.
+#if !PICO_RP2350
+#error "This library requires an RP2350 board -- the HSTX peripheral does not exist on the RP2040."
+#endif
+
 // DVI HSTX driver for use with Pimoroni PicoGraphics
 
 namespace pimoroni {
@@ -113,8 +119,8 @@ namespace pimoroni {
       void reset();
 
       // Rebuilds the MODE_PALETTE4 lookup tables from the palette. Runs
-      // automatically in init() and in DVHSTX4's setColor(); call it
-      // yourself only if you write to get_palette() directly.
+      // automatically in init() and setColor(); call it yourself only if
+      // you write to get_palette() directly.
       void rebuild_palette4_cache();
 
       // Wait for vsync and then flip the buffers
@@ -138,15 +144,10 @@ namespace pimoroni {
       void cursor_off(void) { cursor_y = -1; }
 
     private:
-      RGB888 palette[PALETTE_SIZE];
-      // MODE_PALETTE4 lookup tables now live as Scratch Y globals in
-      // dvhstx.cpp (see palette4_hi/palette4_lo there) instead of class
-      // members, to keep the DMA ISR's hot reads off the striped SRAM
-      // banks the DMA controller itself is contending for.
-      // volatile: swap() writes these on the main thread, the DMA ISR
-      // reads them every scanline. It's the pointer that's volatile, not
-      // the data it points to -- only one side touches a given buffer's
-      // pixels at a time.
+      // palette and palette4 lookup tables are file-scope globals in
+      // dvhstx.cpp (palette_table, palette4_hi/lo).
+      // volatile: swap() writes these pointers on the main thread, the
+      // DMA ISR reads them every scanline.
       uint8_t* volatile frame_buffer_display;
       uint8_t* volatile frame_buffer_back;
       uint32_t* font_cache = nullptr;
@@ -156,6 +157,21 @@ namespace pimoroni {
       // DMA scanline filling
       uint ch_num = 0;
       int line_num = -1;
+
+      // dynamically claimed DMA channel ids; ch_num above is the logical
+      // ring index, dma_chan_ids[ch_num] is the hardware channel
+      uint8_t dma_chan_ids[16];
+      bool channels_claimed = false;
+
+    public:
+      // diagnostics: read from the sketch, no API stability promised.
+      // late_isr_count increments when the ISR finds more than one of our
+      // channel IRQs already pending (the reload fell behind the ring).
+      // max_pending is the worst simultaneous pending count seen.
+      volatile uint32_t late_isr_count = 0;
+      volatile uint32_t max_pending = 0;
+      uint32_t diag_chan_mask = 0;
+    private:
 
       volatile int v_scanline = 2;
       volatile bool flip_next;

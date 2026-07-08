@@ -1,19 +1,11 @@
-// 4-bit (16 color) Adafruit_GFX-compatible framebuffer for RP2350 HSTX,
-// testing native (non-doubled) 720x480.
+// Native (non-doubled) 720x480 in 4bpp on RP2350 HSTX.
 //
-// 720x480 here is the CEA-861 NTSC timing (VIC 2/3) -- taken from a real
-// display's EDID, not computed, so it's known to work on real hardware.
-// Most TVs will show it as 4:3 by default, since this library is DVI-only
-// and doesn't send the HDMI flag that signals 16:9 anamorphic. If your TV
-// has a manual stretch/zoom setting, use that instead.
+// Uses CEA-861 NTSC timing (VIC 2/3). Real full-resolution pixels, unlike
+// DVHSTX_RESOLUTION_360x240 which pixel-doubles to the same timing.
+// DVI has no 16:9 anamorphic flag, so most TVs show this as 4:3; use the
+// TV's stretch setting for widescreen.
 //
-// Note this is a different, native 720x480 from what you get out of
-// DVHSTX_RESOLUTION_360x240, which reaches the same physical timing by
-// doubling a smaller buffer. This one has real pixels at full resolution,
-// not doubled blocks -- that's the point of testing it.
-//
-// RAM: 720x480 4bpp double-buffered is ~338KB, vs ~300KB for 640x480, or
-// ~675KB (too big) at 8bpp. Leaves ~182KB of the RP2350's 520KB free.
+// RAM: ~338KB double-buffered, leaves ~182KB free. 8bpp wouldn't fit.
 
 #include <Adafruit_dvhstx_extended.h>
 
@@ -96,12 +88,8 @@ void setup() {
 }
 
 void loop() {
-  // Redraw fully every frame -- with double buffering, swap() alternates
-  // which buffer is front/back, so partial edits land inconsistently
-  // unless every frame starts from a known state.
-  //
-  // No delay() here: swap() calls flip_blocking(), which already waits
-  // for vsync, so the loop is naturally capped at ~60Hz on its own.
+  // Redraw fully every frame; the buffers alternate on swap().
+  // No delay() needed -- swap() waits for vsync (~60Hz).
   static int x = 0;
   static int dx = 1;
   static float renderMs = -1.0f;

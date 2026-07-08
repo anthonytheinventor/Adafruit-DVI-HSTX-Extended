@@ -308,9 +308,8 @@ public:
                   pimoroni::DVHSTX::MODE_PALETTE4, double_buffered, pinout);
     if (!result)
       return false;
-    // default palette: black at 0, white at 15, ramp between. writes it
-    // directly and rebuilds the cache once instead of going through
-    // setColor() 16 times.
+    // default palette: black at 0, white at 15, ramp between.
+    // one cache rebuild instead of 16 via setColor().
     for (int i = 0; i < 16; i++) {
       uint8_t v = i * 255 / 15;
       hstx.get_palette()[i] = ((uint32_t)v << 16) | ((uint32_t)v << 8) | v;
@@ -476,8 +475,12 @@ public:
     if (!buffer)
       return;
     if (rotation != 0) {
-      // rotated fill isn't implemented, fall back to the generic path
-      Adafruit_GFX::fillRect(x, y, w, h, color);
+      // no fast path for rotation. don't call Adafruit_GFX::fillRect()
+      // here -- it loops drawFastVLine(), which we override to call
+      // fillRect(): infinite recursion.
+      for (int16_t row = y; row < y + h; row++)
+        for (int16_t col = x; col < x + w; col++)
+          drawPixel(col, row, color);
       return;
     }
 
@@ -527,6 +530,41 @@ public:
       }
     }
   }
+
+  /**************************************************************************/
+  /*!
+     @brief    Draw a horizontal line with one palette index (0-15).
+     Routes through the fast fillRect above.
+     @param x  Left edge
+     @param y  Vertical position
+     @param w  Width in pixels
+     @param color  Palette index, 0-15
+  */
+  /**************************************************************************/
+  void drawFastHLine(int16_t x, int16_t y, int16_t w,
+                     uint16_t color) override {
+    fillRect(x, y, w, 1, color);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Draw a vertical line with one palette index (0-15).
+     Routes through the fast fillRect above.
+     @param x  Horizontal position
+     @param y  Top edge
+     @param h  Height in pixels
+     @param color  Palette index, 0-15
+  */
+  /**************************************************************************/
+  void drawFastVLine(int16_t x, int16_t y, int16_t h,
+                     uint16_t color) override {
+    fillRect(x, y, 1, h, color);
+  }
+
+  /*!
+     @brief  Access the underlying driver (diagnostics counters live there)
+  */
+  pimoroni::DVHSTX &driver() { return hstx; }
 
 private:
   DVHSTXPinout pinout;

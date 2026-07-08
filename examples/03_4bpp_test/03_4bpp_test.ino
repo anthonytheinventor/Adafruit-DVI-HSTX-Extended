@@ -1,12 +1,8 @@
 // 4-bit (16 color) Adafruit_GFX-compatible framebuffer for RP2350 HSTX.
+// Double-buffered 640x480 at 4bpp is ~300KB (~600KB at 8bpp doesn't fit).
+// Status info is drawn on the display itself, not Serial.
 //
-// True double-buffered 640x480 fits in ~300KB. At 8bpp double-buffered
-// that's ~600KB, which doesn't fit in the RP2350's 520KB of SRAM.
-//
-// Status info is drawn on the display itself instead of Serial, since
-// that's more useful once the display is actually running.
-//
-// Palette (16 entries total):
+// Palette:
 //   0     = black  -- status panel background
 //   1-14  = green -> magenta gradient bars
 //   15    = white  -- status panel text
@@ -91,12 +87,8 @@ void setup() {
 }
 
 void loop() {
-  // Redraw fully every frame -- with double buffering, swap() alternates
-  // which buffer is front/back, so partial edits land inconsistently
-  // unless every frame starts from a known state.
-  //
-  // No delay() here: swap() calls flip_blocking(), which already waits
-  // for vsync, so the loop is naturally capped at ~60Hz on its own.
+  // Redraw fully every frame; the buffers alternate on swap().
+  // No delay() needed -- swap() waits for vsync (~60Hz).
   static int x = 0;
   static int dx = 1;
   static float renderMs = -1.0f;

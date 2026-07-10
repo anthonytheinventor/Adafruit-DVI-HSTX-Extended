@@ -1,0 +1,109 @@
+#pragma once
+
+#include "dvi.hpp"
+#include "pico/stdlib.h"
+
+#if !PICO_RP2350
+#error "This library requires an RP2350 board -- the HSTX peripheral does not exist on the RP2040."
+#endif
+
+namespace pimoroni {
+
+  struct DVHSTXPinout; // dvhstx.hpp
+
+  // "Turbo" 720x480 8bpp RGB332 driver.
+  //
+  // Unlike DVHSTX, there is no per-scanline ISR and no line buffers. The
+  // HSTX command words (sync sequences and TMDS headers) are unrolled into
+  // one whole-frame buffer with the pixel bytes interleaved between them.
+  // A free-running pair of DMA channels streams that buffer to the HSTX
+  // FIFO forever; the TMDS encoder expands RGB332 to full pixels in
+  // hardware. No CPU runs per line, so interrupt latency (TinyUSB, etc.)
+  // cannot underrun the display.
+  //
+  // Costs: single-buffered only (~352KB at 720x480, ~314KB at 640x480;
+  // two copies don't fit in SRAM), fixed RGB332 color (the expander's
+  // bit->lane mapping replaces the palette), and rows are strided -- 28
+  // bytes of command words sit before each pixel row. Use row() /
+  // row_stride_bytes() to draw.
+  class DVHSTXTurbo {
+  public:
+    ~DVHSTXTurbo() { reset(); }
+
+    // Supported: 720x480 and 640x480 (both CEA/VESA 60Hz timing).
+    bool init(uint16_t width, uint16_t height, const DVHSTXPinout &pinout);
+
+    int width() const { return disp_width; }
+    int height() const { return disp_height; }
+    void reset();
+
+    bool is_inited() const { return inited; }
+
+    // Pointer to the first pixel byte of row y (width() bytes per row).
+    uint8_t *row(int y) {
+      return frame_pixels_base + (size_t)y * row_stride;
+    }
+    const uint8_t *row(int y) const {
+      return frame_pixels_base + (size_t)y * row_stride;
+    }
+
+    // Distance in bytes from row y to row y+1 (includes the interleaved
+    // command words -- do not write into the gap).
+    size_t row_stride_bytes() const { return row_stride; }
+
+    // Blocks until scanout enters the vertical blanking block. Waits for
+    // the active region first, so on return a full vblank (~1.4ms) is
+    // ahead. Polls the DMA read pointer -- there is no vsync IRQ.
+    void wait_for_vsync() const;
+
+    // RGB888 -> RGB332
+    static constexpr uint8_t color(uint8_t r, uint8_t g, uint8_t b) {
+      return (r & 0xE0) | ((g & 0xE0) >> 3) | (b >> 6);
+    }
+
+    // Copy n_rows of width() pixels from a contiguous source buffer into
+    // the (strided) frame, starting at row y. Uses a scatter-gather DMA
+    // chain -- one control block per row -- so the interleaved command
+    // words between rows are never touched. src must be 4-byte aligned;
+    // if it isn't (or no DMA channels are free) a memcpy fallback is used.
+    //
+    // block=true waits for completion. block=false returns immediately;
+    // do not modify src or start another blit until blit_busy() is false.
+    // Rows outside the display are clipped.
+    bool blit_rows(int y, const uint8_t *src, int n_rows, bool block = true);
+    bool blit_busy() const;
+    void blit_wait() const {
+      while (blit_busy())
+        tight_loop_contents();
+    }
+
+  private:
+    void setup_hstx_clock();
+    void build_frame_commands();
+
+    uint32_t *frame_cmd_buffer = nullptr; // whole-frame command+pixel stream
+    uint8_t *frame_pixels_base = nullptr; // first pixel byte of row 0
+    size_t row_stride = 0;                // bytes, row y -> row y+1
+    uint32_t frame_words = 0;
+    uint32_t pixel_words = 0;             // pixel words per active line
+    uint32_t active_start_offset = 0;     // byte offset of first active line
+    uint16_t disp_width = 0;
+    uint16_t disp_height = 0;
+
+    // read by the restart DMA channel, holds &frame_cmd_buffer[0]
+    uintptr_t restart_read_word = 0;
+
+    int8_t dma_ch_data = -1;
+    int8_t dma_ch_restart = -1;
+
+    // blit engine (lazily claimed on first blit_rows call)
+    int8_t dma_ch_blit = -1;
+    int8_t dma_ch_blit_ctrl = -1;
+    uint32_t *blit_blocks = nullptr;    // {read, write_trig} pairs + null
+    const uint32_t *blit_blocks_end = nullptr;
+
+    const struct dvi_timing *timing = nullptr;
+    bool inited = false;
+  };
+
+} // namespace pimoroni

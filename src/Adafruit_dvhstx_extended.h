@@ -5,6 +5,7 @@
 #include "Adafruit_GFX.h"
 
 #include "drivers/dvhstx/dvhstx.hpp"
+#include "drivers/dvhstx/dvhstx_turbo.hpp"
 
 #if DOXYGEN
 /// Enumerated types in the library. Due to a technical limitations in the
@@ -773,4 +774,303 @@ private:
       hstx.set_cursor(cursor_x == _width ? _width - 1 : cursor_x, cursor_y);
     }
   }
+};
+
+/// 8-bit RGB332 "turbo" canvas for DVI output (720x480 or 640x480).
+///
+/// No per-scanline ISR: the HSTX command words are unrolled into the
+/// framebuffer itself and a free-running DMA pair streams the whole frame
+/// forever, with the HSTX TMDS encoder expanding RGB332 in hardware.
+/// Display underruns from blocked interrupts (the failure mode the
+/// 8-deep DMA ring in the other classes defends against) are structurally
+/// impossible here -- there is no ISR to be late.
+///
+/// Trade-offs versus DVHSTX8:
+///  - Single-buffered only (~352KB at 720x480, ~314KB at 640x480; a
+///    second buffer does not fit in SRAM).
+///  - Fixed RGB332 color instead of a 256-entry palette: the pixel byte
+///    IS the color (rrrgggbb). Use color332() to build values.
+///  - Rows are strided: 28 bytes of command words precede each pixel
+///    row. drawPixel/fillRect handle this; for direct blits use
+///    rowAddr() and rowStride().
+class DVHSTX8Turbo : public Adafruit_GFX {
+public:
+  /**************************************************************************/
+  /*!
+     @brief    Instantiate an RGB332 turbo canvas
+     @param    pinout Details of the HSTX pinout
+     @param    res   Display resolution -- DVHSTX_RESOLUTION_720x480
+     (default) or DVHSTX_RESOLUTION_640x480 (other values fail in begin())
+  */
+  /**************************************************************************/
+  DVHSTX8Turbo(DVHSTXPinout pinout,
+               DVHSTXResolution res = DVHSTX_RESOLUTION_720x480)
+      : Adafruit_GFX(dvhstx_width(res), dvhstx_height(res)), pinout(pinout),
+        res{res} {}
+  ~DVHSTX8Turbo() { end(); }
+
+  /**************************************************************************/
+  /*!
+     @brief    Start the display
+     @return   true if successful, false in case of error (usually the
+     ~352KB frame allocation failing)
+  */
+  /**************************************************************************/
+  bool begin() {
+    if (!hstx.init(dvhstx_width(res), dvhstx_height(res), pinout))
+      return false;
+    pixels0 = hstx.row(0);
+    stride = hstx.row_stride_bytes();
+    return true;
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Stop the display
+  */
+  /**************************************************************************/
+  void end() {
+    hstx.reset();
+    pixels0 = nullptr;
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Convert 24-bit RGB to the RGB332 pixel value used by this
+     canvas
+     @param r The input red value, 0 to 255
+     @param g The input green value, 0 to 255
+     @param b The input blue value, 0 to 255
+     @return  The corresponding 8-bit rrrgggbb value
+  */
+  /**************************************************************************/
+  static constexpr uint8_t color332(uint8_t r, uint8_t g, uint8_t b) {
+    return pimoroni::DVHSTXTurbo::color(r, g, b);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Set one pixel (color is the raw RGB332 byte; the upper 8
+     bits of the GFX 16-bit color are ignored)
+     @param x  Horizontal position
+     @param y  Vertical position
+     @param color  RGB332 value, 0-255
+  */
+  /**************************************************************************/
+  void drawPixel(int16_t x, int16_t y, uint16_t color) override {
+    if (!pixels0)
+      return;
+    if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height))
+      return;
+
+    // same rotation transform Adafruit_GFX canvases use
+    int16_t t;
+    switch (rotation) {
+    case 1:
+      t = x;
+      x = WIDTH - 1 - y;
+      y = t;
+      break;
+    case 2:
+      x = WIDTH - 1 - x;
+      y = HEIGHT - 1 - y;
+      break;
+    case 3:
+      t = x;
+      x = y;
+      y = HEIGHT - 1 - t;
+      break;
+    }
+
+    pixels0[(size_t)y * stride + x] = (uint8_t)color;
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Read back one pixel's RGB332 value
+     @param x  Horizontal position
+     @param y  Vertical position
+     @return   RGB332 value, or 0 if out of bounds / not started
+  */
+  /**************************************************************************/
+  uint8_t getPixel(int16_t x, int16_t y) const {
+    if (!pixels0)
+      return 0;
+    if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height))
+      return 0;
+
+    int16_t t;
+    switch (rotation) {
+    case 1:
+      t = x;
+      x = WIDTH - 1 - y;
+      y = t;
+      break;
+    case 2:
+      x = WIDTH - 1 - x;
+      y = HEIGHT - 1 - y;
+      break;
+    case 3:
+      t = x;
+      x = y;
+      y = HEIGHT - 1 - t;
+      break;
+    }
+
+    return pixels0[(size_t)y * stride + x];
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Fill the whole screen with one RGB332 value. Rows are
+     memset individually -- the gaps between them hold HSTX command words.
+     @param color  RGB332 value, 0-255
+  */
+  /**************************************************************************/
+  void fillScreen(uint16_t color) override {
+    if (!pixels0)
+      return;
+    for (int16_t y = 0; y < HEIGHT; y++)
+      memset(pixels0 + (size_t)y * stride, (uint8_t)color, WIDTH);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Fill a rectangle with one RGB332 value. Fast-path override
+     using one memset per row.
+     @param x  Left edge
+     @param y  Top edge
+     @param w  Width
+     @param h  Height
+     @param color  RGB332 value, 0-255
+  */
+  /**************************************************************************/
+  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h,
+                uint16_t color) override {
+    if (!pixels0)
+      return;
+    if (rotation != 0) {
+      // no fast path for rotation; don't call Adafruit_GFX::fillRect()
+      // here -- it loops drawFastVLine(), which we route back to
+      // fillRect(): infinite recursion.
+      for (int16_t row = y; row < y + h; row++)
+        for (int16_t col = x; col < x + w; col++)
+          drawPixel(col, row, color);
+      return;
+    }
+
+    if (x < 0) {
+      w += x;
+      x = 0;
+    }
+    if (y < 0) {
+      h += y;
+      y = 0;
+    }
+    if (x + w > _width)
+      w = _width - x;
+    if (y + h > _height)
+      h = _height - y;
+    if (w <= 0 || h <= 0)
+      return;
+
+    for (int16_t row = y; row < y + h; row++)
+      memset(pixels0 + (size_t)row * stride + x, (uint8_t)color, w);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Draw a horizontal line. Routes through the fast fillRect.
+     @param x  Left edge
+     @param y  Vertical position
+     @param w  Width in pixels
+     @param color  RGB332 value, 0-255
+  */
+  /**************************************************************************/
+  void drawFastHLine(int16_t x, int16_t y, int16_t w,
+                     uint16_t color) override {
+    fillRect(x, y, w, 1, color);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Draw a vertical line. Routes through the fast fillRect.
+     @param x  Horizontal position
+     @param y  Top edge
+     @param h  Height in pixels
+     @param color  RGB332 value, 0-255
+  */
+  /**************************************************************************/
+  void drawFastVLine(int16_t x, int16_t y, int16_t h,
+                     uint16_t color) override {
+    fillRect(x, y, 1, h, color);
+  }
+
+  /**************************************************************************/
+  /*!
+     @brief    Wait for the start of vertical blanking (~1.4ms window).
+     There is no back buffer; draw inside vblank to avoid tearing on
+     animated content.
+  */
+  /**************************************************************************/
+  void waitForVsync() { hstx.wait_for_vsync(); }
+
+  /**************************************************************************/
+  /*!
+     @brief    Direct access: pointer to the first pixel byte of row y
+     @param y  Row, 0 to height()-1
+     @return   Pointer to width() contiguous pixel bytes
+  */
+  /**************************************************************************/
+  uint8_t *rowAddr(int16_t y) { return hstx.row(y); }
+
+  /*!
+     @brief  Direct access: bytes from one row's pixels to the next
+     (includes the interleaved command words -- never write into the gap)
+  */
+  size_t rowStride() const { return hstx.row_stride_bytes(); }
+
+  /**************************************************************************/
+  /*!
+     @brief    Copy rows of pixels from a contiguous staging buffer into
+     the frame, via a scatter-gather DMA chain (one control block per row,
+     so the command words between rows are never touched). This is the
+     fast path for presenting content composed off-screen -- in SRAM
+     scratch or PSRAM -- without per-pixel drawing into the live buffer.
+     Ignores rotation: src rows map to physical rows.
+     @param y      First destination row
+     @param src    Contiguous buffer, width() bytes per row. 4-byte
+     aligned for the DMA path (falls back to memcpy otherwise)
+     @param nRows  Number of rows to copy (clipped to the display)
+     @param block  true (default) waits for completion; false returns
+     immediately -- don't touch src or start another blit until
+     blitBusy() is false
+     @return   true on success (including fallback), false if not begun
+  */
+  /**************************************************************************/
+  bool blitRows(int y, const uint8_t *src, int nRows, bool block = true) {
+    return hstx.blit_rows(y, src, nRows, block);
+  }
+
+  /*!
+     @brief  True while an async blitRows() is still transferring
+  */
+  bool blitBusy() const { return hstx.blit_busy(); }
+
+  /*!
+     @brief  Wait for an async blitRows() to finish
+  */
+  void blitWait() { hstx.blit_wait(); }
+
+  /*!
+     @brief  Access the underlying driver
+  */
+  pimoroni::DVHSTXTurbo &driver() { return hstx; }
+
+private:
+  DVHSTXPinout pinout;
+  DVHSTXResolution res;
+  mutable pimoroni::DVHSTXTurbo hstx;
+  uint8_t *pixels0 = nullptr;
+  size_t stride = 0;
 };

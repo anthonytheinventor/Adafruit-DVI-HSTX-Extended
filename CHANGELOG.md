@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.4.0] - 2026-07-10
+
+### Added
+- `DVHSTX8Turbo::blitRows(y, src, nRows, block)` (+ `blitBusy()`/`blitWait()`): DMA scatter-gather copy of contiguous pixel rows into the strided frame. A control channel feeds per-row {read, write-trigger} pairs into a data channel through the AL2 alias window, ending on a null trigger, so the interleaved command words between rows are never touched. Synchronous or async; falls back to memcpy for unaligned sources or if no DMA channels are free. Channels are claimed lazily on first use and released in `reset()`. Intended as the presentation primitive for off-screen composition (SRAM scratch or PSRAM staging).
+- Scanout data channel now sets DMA-internal high priority (`channel_config_set_high_priority`) so a flat-out mem-to-mem blit can't add latency to the display feed.
+
+### Changed
+- Example `05_turbo_720x480_test`: the rainbow fields are precomposed into a 63-row cache at setup (they only contain 63 unique rows) and the per-frame redraw is now pure presentation via `blitRows()` -- no per-pixel work. Also builds with sketch-local `#pragma GCC optimize("O2")`. Expected full-frame present time drops roughly an order of magnitude versus 1.3.0's per-pixel LUT loop.
+
+
+## [1.3.0] - 2026-07-09
+
+### Added
+- 640x480 support in turbo mode: `DVHSTX8Turbo(pinout, DVHSTX_RESOLUTION_640x480)`. `DVHSTXTurbo::init()` now takes width/height and selects between the 720x480 CEA and 640x480 VESA 60Hz timing tables; the command-stream layout, DMA loop, and RGB332 expander config are resolution-independent. Frame buffer is ~314KB at 640x480 (vs ~352KB at 720x480). 720x480 remains the default.
+- Example `05_turbo_720x480_test` is now width-agnostic (fixed-point hue segmentation, all loops driven by `display.width()`), so switching the constructor to 640x480 renders correctly.
+
+### Changed
+- `DVHSTXTurbo::WIDTH`/`HEIGHT` compile-time constants replaced by runtime `width()`/`height()` accessors.
+
+## [1.2.0] - 2026-07-09
+
+### Added
+- `DVHSTX8Turbo`: zero-ISR 720x480 8bpp RGB332 mode. HSTX command words are unrolled into a whole-frame buffer (pixel bytes interleaved between the sync/TMDS opcodes) and streamed by a free-running two-channel DMA loop -- a data channel paced by `DREQ_HSTX` chains to a restart channel that writes the buffer address back into the data channel's read-address trigger. RGB332 is expanded to full pixels by the HSTX TMDS encoder (`expand_shift` 4x8-bit, lane rotations 0/29/26), so no per-scanline CPU work exists and interrupt-latency underruns are structurally impossible. Single-buffered only (~352KB); rows strided by 748 bytes with the pixel data 28 bytes in.
+- `pimoroni::DVHSTXTurbo` low-level driver (`dvhstx_turbo.hpp/.cpp`) with `row()`, `row_stride_bytes()`, and a polled `wait_for_vsync()` (no IRQ anywhere in this mode).
+- Turbo mode elevates DMA bus priority (`bus_ctrl_hw->priority`, DMA_R|DMA_W) so the naked scanout feed can't be starved by core SRAM traffic during a bank collision -- this is the bus-contention underrun path, distinct from the interrupt-latency one the 8-deep ring guards in the other driver. Restored to fair arbitration on `reset()`.
+- Example `05_turbo_720x480_test`: hue-x-value and hue-x-saturation rainbow fields plus R/G/B ramps, a vblank-synced animated marker, and a timed full-screen redraw every frame (identical-content overwrite -- tear-free in a single buffer) with on-screen ms/frame stats.
+- `keywords.txt` entries for the new class and methods.
+
 ## [1.1.0] - 2026-07-08
 
 ### Added

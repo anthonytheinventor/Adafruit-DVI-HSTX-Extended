@@ -1,9 +1,10 @@
 # Adafruit DVI HSTX Extended <!-- omit in toc -->
 
-My ([anthonytheinventor](https://github.com/anthonytheinventor)) fork of Adafruit's `Adafruit_dvhstx` library — an Adafruit GFX compatible DVI driver for RP2 chips with HSTX (Adafruit Metro RP2350, Adafruit Fruit Jam, etc). It adds a 4bpp indexed-color mode, a native 720x480 resolution, and some DMA-path performance work. All credit for the original driver goes to Jeff Epler / Adafruit and the Pimoroni `dvhstx` driver underneath it.
+My ([anthonytheinventor](https://github.com/anthonytheinventor)) fork of Adafruit's `Adafruit_dvhstx` library — an Adafruit GFX compatible DVI driver for RP2 chips with HSTX (Adafruit Metro RP2350, Adafruit Fruit Jam, etc). The headline additions are a **zero-ISR "turbo" mode** that generates a rock-solid 720x480 or 640x480 DVI signal with no CPU involvement whatsoever, and a **scatter-gather DMA blitter** (`blitRows()`) for presenting off-screen-composed content in a fraction of a millisecond. The fork also adds a 4bpp indexed-color mode, a native 720x480 resolution for the standard driver, and DMA-path performance work. All credit for the original driver goes to Jeff Epler / Adafruit and the Pimoroni `dvhstx` driver underneath it.
 
 **Important note on overclocking:** This library overclocks your RP2 chip to 240MHz just by including `<Adafruit_dvhstx_extended.h>`, separate from the Tools menu setting (which must stay at 150MHz). Like any overclock, there's some risk to component lifespan that's hard to quantify. Proceed at your own discretion.
 
+- [The turbo mode and the blitter](#the-turbo-mode-and-the-blitter)
 - [Supported modes and resolutions](#supported-modes-and-resolutions)
 - [Why this fork exists](#why-this-fork-exists)
 - [New features](#new-features)
@@ -12,6 +13,18 @@ My ([anthonytheinventor](https://github.com/anthonytheinventor)) fork of Adafrui
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Documentation](#documentation)
+
+## The turbo mode and the blitter
+
+**`DVHSTX8Turbo` is a display mode with no interrupt handler.** Every other mode in this library (and in the original) works the same basic way: a per-scanline ISR feeds pixel data to the HSTX peripheral through a ring of line buffers, and if anything blocks interrupts for too long — heavy USB host traffic, flash writes, a long `noInterrupts()` section — the ring runs dry and the picture drops out. The 8-deep ring in this fork raises that tolerance a lot, but the failure mode still exists; it's just further away.
+
+Turbo mode removes the failure mode instead of pushing it back. The HSTX command words (sync sequences and pixel-run headers) are unrolled directly into the frame buffer, interleaved with the pixel bytes, and a free-running pair of DMA channels streams the whole thing to the HSTX FIFO forever — one channel moves the frame, the second re-arms the first by writing the buffer address back into its read-address trigger. RGB332 pixels are expanded to full TMDS symbols by the HSTX hardware itself. **No CPU code runs per scanline, per frame, or ever.** There is no ISR to be late, so the DVI signal's integrity is completely decoupled from what your sketch and its interrupts are doing. The scanout DMA is also given bus priority, so even flat-out memory traffic from your code can't starve the feed.
+
+The cost is that it's single-buffered (a second 8bpp buffer doesn't fit in SRAM at these resolutions) and the color format is fixed RGB332 — the pixel byte *is* the color, no palette. Single-buffering is a smaller problem than it sounds, because of the second feature:
+
+**`blitRows()` is a DMA blitter for presenting composed content.** The turbo frame's rows are strided (28 bytes of command words sit before each pixel row), so `blitRows()` uses a scatter-gather chain — a control DMA channel feeds one {source, destination} pair per row to a data channel — to copy contiguous rows from anywhere in memory into the live frame without ever touching the command words. Compose your content off-screen at your leisure (an SRAM scratch tile, or big assets staged in PSRAM), then present it in one call, synchronously or async. A full-width numeral band lands in a few hundred microseconds; an entire 720x480 frame presents in well under 1ms — fast enough to swap the whole screen inside the vertical blanking interval, which gets you tear-free full-screen updates on a single buffer. Falls back to `memcpy` transparently if the source is unaligned or no DMA channels are free, and the channels are only claimed on first use.
+
+See `05_turbo_720x480_test` for both in action: a full-screen presentation via `blitRows()` measured every frame (0.7ms on real hardware), with the changing elements drawn inside vblank.
 
 ## Supported modes and resolutions
 
@@ -67,7 +80,11 @@ Turbo mode also provides `blitRows()` — a scatter-gather DMA copy of contiguou
 
 ## Why this fork exists
 
-I wanted higher resolution for data displays and dashboards — enough pixels to actually show something useful — without giving up color or double buffering. Double buffering matters here because a dashboard that redraws constantly will flicker and tear without it. The problem is the RP2350 only has 520KB of RAM, and a double-buffered framebuffer at the original library's 8bpp color mode gets expensive fast — 720x480 at 8bpp double-buffered doesn't fit at all. Dropping to 4bpp (16 colors) cuts the framebuffer cost in half, which is what makes a double-buffered 720x480 display possible in the first place.
+I wanted a high-resolution color dashboard driven by an RP2350 — enough pixels to show real data at a glance on a TV, in color, without flicker. That ambition ran into the chip's constraints from two directions, and the two halves of this fork are the answers.
+
+The first constraint is RAM. The RP2350 has 520KB, and a double-buffered framebuffer at the original library's 8bpp color mode gets expensive fast — 720x480 at 8bpp double-buffered doesn't fit at all. Double buffering matters for a dashboard that redraws constantly, or it will flicker and tear. Dropping to 4bpp (16 colors) cuts the framebuffer cost in half, which is what makes a double-buffered native 720x480 display possible. That's `DVHSTX4` and the native 720x480 timing.
+
+The second constraint is that a display node in a real system doesn't get to *just* be a display. Mine also services USB, radios, and sensors — interrupt-driven work that's bursty and not always polite. In the ISR-fed display modes, every interrupt source in the sketch is implicitly part of the video signal path: block interrupts a little too long and the scanline ring underruns and the picture drops. I widened the ring to push that boundary out, but I kept designing around it — auditing every library for interrupt behavior, being paranoid about `noInterrupts()`. The turbo mode is the escape from that whole class of problem: the DVI signal is generated entirely by DMA hardware with zero CPU involvement, so the CPU is free to take as many interrupts as the application wants, for as long as they take, without ever compromising signal integrity. The display can't glitch because of software, full stop — which is exactly the property you want when the display is bolted to a wall doing a job. The result is a more reliable system *and* a simpler one: one less real-time constraint to design the rest of the firmware around.
 
 ## New features
 
@@ -78,7 +95,7 @@ Stuff that doesn't exist in the original library:
 - **Native 720x480** (`DVHSTX_RESOLUTION_720x480`), using real CEA-861 NTSC timing pulled from a display's EDID and checked on hardware. Full resolution, not pixel-doubled like the original library's `DVHSTX_RESOLUTION_360x240` — and it only fits in RAM at 4bpp.
 - **Palette lookup caching**: `rebuild_palette4_cache()` precomputes two 256-entry lookup tables so the DMA path is a straight lookup per pixel, no bit-shifting. Runs automatically on `init()` and `DVHSTX4::setColor()`.
 - **Two new examples**: `03_4bpp_test` and `04_720x480_test`.
-- **`DVHSTX8Turbo` (1.2.0, 640x480 added in 1.3.0)**: a zero-ISR 8bpp RGB332 mode at 720x480 or 640x480. The HSTX command words are unrolled directly into a whole-frame buffer with the pixel bytes interleaved between them, and a free-running pair of DMA channels streams that buffer to the HSTX FIFO forever — one channel moves the frame, the other re-arms it by writing the buffer address back into the first channel's read-address trigger. The HSTX TMDS encoder expands RGB332 to full pixels in hardware, so no CPU code runs per scanline at all. The interrupt-latency underrun problem the 8-deep DMA ring defends against simply cannot occur in this mode: there is no ISR to be late, no matter what USB or `noInterrupts()` does. Trade-offs: single-buffered only (~352KB at 720x480, ~314KB at 640x480 — a second buffer doesn't fit in SRAM), fixed RGB332 color instead of a palette (the expander's bit-to-lane mapping replaces the lookup), and strided rows (28 bytes of command words precede each 720-byte pixel row; `drawPixel`/`fillRect` handle it, `rowAddr()`/`rowStride()` expose it for direct blits). Ships with example `05_turbo_720x480_test`.
+- **`DVHSTX8Turbo`** (1.2.0; 640x480 added in 1.3.0) and **`blitRows()`** (1.4.0): the zero-ISR turbo mode and its DMA blitter — see [the section above](#the-turbo-mode-and-the-blitter). Implementation details worth knowing: rows are strided (28 bytes of command words precede each pixel row; `drawPixel`/`fillRect` handle it, `rowAddr()`/`rowStride()` expose it), and the scanout channel takes both fabric-level (`bus_ctrl`) and DMA-internal high priority. Ships with example `05_turbo_720x480_test`.
 
 ## Performance improvements
 

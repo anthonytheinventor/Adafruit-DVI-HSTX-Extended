@@ -39,6 +39,125 @@ void DVHSTXTurbo::setup_hstx_clock() {
                   freq, freq);
 }
 
+
+// ---------------------------------------------------------------------------
+// HDMI data island support (opt-in via init(..., hdmi=true))
+//
+// A DVI signal becomes minimally-HDMI by transmitting an AVI InfoFrame in a
+// data island once per frame, plus video preambles/guard bands before each
+// active line. These symbols are generated during initialization and stored
+// in the static command stream.
+//
+// TERC4 and BCH tables follow HDMI 1.3 and PicoDVI
+// (BSD-3-Clause, Copyright (c) 2021 Luke Wren and contributors).
+// ---------------------------------------------------------------------------
+
+// Control-period symbols for the CTL[3:0] preamble patterns (10-bit TMDS
+// control codes, same convention as TMDS_CTRL_xx in dvi.hpp).
+// Data island preamble: CTL = 0101 -> ch1 = CTRL_01, ch2 = CTRL_01
+// Video preamble:       CTL = 0001 -> ch1 = CTRL_01, ch2 = CTRL_00
+#define HDMI_DI_PREAMBLE(ch0_sync) \
+  ((ch0_sync) | (TMDS_CTRL_01 << 10) | ((uint32_t)TMDS_CTRL_01 << 20))
+#define HDMI_VIDEO_PREAMBLE(ch0_sync) \
+  ((ch0_sync) | (TMDS_CTRL_01 << 10) | ((uint32_t)TMDS_CTRL_00 << 20))
+
+// Video guard band (2 clocks): fixed symbols per lane.
+#define HDMI_VIDEO_GUARD \
+  (0x2CCu | (0x133u << 10) | (0x2CCu << 20))
+
+// TERC4: 4-bit data -> 10-bit symbols, used on all lanes during islands.
+static const uint16_t terc4_syms[16] = {
+    0b1010011100, 0b1001100011, 0b1011100100, 0b1011100010,
+    0b0101110001, 0b0100011110, 0b0110001110, 0b0100111100,
+    0b1011001100, 0b0100111001, 0b0110011100, 0b1011000110,
+    0b1010001110, 0b1001110001, 0b0101100011, 0b1011000011,
+};
+
+// BCH ECC byte table (HDMI packet error correction), from PicoDVI.
+static const uint8_t bch_table[256] = {
+    0x00, 0xd9, 0xb5, 0x6c, 0x6d, 0xb4, 0xd8, 0x01, 0xda, 0x03, 0x6f, 0xb6,
+    0xb7, 0x6e, 0x02, 0xdb, 0xb3, 0x6a, 0x06, 0xdf, 0xde, 0x07, 0x6b, 0xb2,
+    0x69, 0xb0, 0xdc, 0x05, 0x04, 0xdd, 0xb1, 0x68, 0x61, 0xb8, 0xd4, 0x0d,
+    0x0c, 0xd5, 0xb9, 0x60, 0xbb, 0x62, 0x0e, 0xd7, 0xd6, 0x0f, 0x63, 0xba,
+    0xd2, 0x0b, 0x67, 0xbe, 0xbf, 0x66, 0x0a, 0xd3, 0x08, 0xd1, 0xbd, 0x64,
+    0x65, 0xbc, 0xd0, 0x09, 0xc2, 0x1b, 0x77, 0xae, 0xaf, 0x76, 0x1a, 0xc3,
+    0x18, 0xc1, 0xad, 0x74, 0x75, 0xac, 0xc0, 0x19, 0x71, 0xa8, 0xc4, 0x1d,
+    0x1c, 0xc5, 0xa9, 0x70, 0xab, 0x72, 0x1e, 0xc7, 0xc6, 0x1f, 0x73, 0xaa,
+    0xa3, 0x7a, 0x16, 0xcf, 0xce, 0x17, 0x7b, 0xa2, 0x79, 0xa0, 0xcc, 0x15,
+    0x14, 0xcd, 0xa1, 0x78, 0x10, 0xc9, 0xa5, 0x7c, 0x7d, 0xa4, 0xc8, 0x11,
+    0xca, 0x13, 0x7f, 0xa6, 0xa7, 0x7e, 0x12, 0xcb, 0x83, 0x5a, 0x36, 0xef,
+    0xee, 0x37, 0x5b, 0x82, 0x59, 0x80, 0xec, 0x35, 0x34, 0xed, 0x81, 0x58,
+    0x30, 0xe9, 0x85, 0x5c, 0x5d, 0x84, 0xe8, 0x31, 0xea, 0x33, 0x5f, 0x86,
+    0x87, 0x5e, 0x32, 0xeb, 0xe2, 0x3b, 0x57, 0x8e, 0x8f, 0x56, 0x3a, 0xe3,
+    0x38, 0xe1, 0x8d, 0x54, 0x55, 0x8c, 0xe0, 0x39, 0x51, 0x88, 0xe4, 0x3d,
+    0x3c, 0xe5, 0x89, 0x50, 0x8b, 0x52, 0x3e, 0xe7, 0xe6, 0x3f, 0x53, 0x8a,
+    0x41, 0x98, 0xf4, 0x2d, 0x2c, 0xf5, 0x99, 0x40, 0x9b, 0x42, 0x2e, 0xf7,
+    0xf6, 0x2f, 0x43, 0x9a, 0xf2, 0x2b, 0x47, 0x9e, 0x9f, 0x46, 0x2a, 0xf3,
+    0x28, 0xf1, 0x9d, 0x44, 0x45, 0x9c, 0xf0, 0x29, 0x20, 0xf9, 0x95, 0x4c,
+    0x4d, 0x94, 0xf8, 0x21, 0xfa, 0x23, 0x4f, 0x96, 0x97, 0x4e, 0x22, 0xfb,
+    0x93, 0x4a, 0x26, 0xff, 0xfe, 0x27, 0x4b, 0x92, 0x49, 0x90, 0xfc, 0x25,
+    0x24, 0xfd, 0x91, 0x48,
+};
+
+static uint8_t bch_ecc(const uint8_t *p, int n) {
+  uint8_t v = 0;
+  for (int i = 0; i < n; i++)
+    v = bch_table[p[i] ^ v];
+  return v;
+}
+
+// Build the 32 island-body words (ch0|ch1<<10|ch2<<20 per pixel clock) for
+// one HDMI packet. hv = live (VSYNC<<1)|HSYNC levels during the island.
+static void hdmi_encode_packet_words(const uint8_t header[4],
+                                     const uint8_t sub[4][8], uint32_t hv,
+                                     uint32_t *out) {
+  for (int t = 0; t < 32; t++) {
+    uint32_t hdr_bit = (header[t >> 3] >> (t & 7)) & 1;
+    // ch0: D3 = 0 only on the island's first clock, D2 = header bit,
+    // D1 = VSYNC level, D0 = HSYNC level
+    uint32_t ch0 = terc4_syms[(t ? 8 : 0) | (hdr_bit << 2) | hv];
+    // ch1/ch2: bit k = subpacket k's even/odd bit for this clock
+    uint32_t n1 = 0, n2 = 0;
+    int byte = t >> 2, sh = (t & 3) << 1;
+    for (int k = 0; k < 4; k++) {
+      n1 |= ((sub[k][byte] >> sh) & 1) << k;
+      n2 |= ((sub[k][byte] >> (sh + 1)) & 1) << k;
+    }
+    out[t] = ch0 | ((uint32_t)terc4_syms[n1] << 10) |
+             ((uint32_t)terc4_syms[n2] << 20);
+  }
+}
+
+// AVI InfoFrame (CEA-861): declares VIC + picture aspect (the anamorphic
+// flag), full-range RGB, underscan, and IT/graphics content signaling.
+static void hdmi_build_avi_packet(uint8_t vic, uint8_t aspect_m,
+                                  uint8_t header[4], uint8_t sub[4][8]) {
+  header[0] = 0x82; // AVI InfoFrame
+  header[1] = 0x02; // version 2
+  header[2] = 13;   // length
+  header[3] = bch_ecc(header, 3);
+
+  uint8_t pb[14] = {0};
+  pb[1] = 0x12;                     // A=1, RGB, no bars, underscan
+  pb[2] = (aspect_m << 4) | 0x08;   // picture aspect; AFAR = same as picture
+  pb[3] = 0x88;                     // ITC=1, Q = full-range RGB
+  pb[4] = vic;                      // video identification code
+  pb[5] = 0x00;                     // CN = graphics content
+  // pb[6..13] = 0: no pixel repetition, no bar info
+  uint32_t sum = header[0] + header[1] + header[2];
+  for (int i = 1; i < 14; i++)
+    sum += pb[i];
+  pb[0] = (uint8_t)(0x100 - (sum & 0xFF)); // checksum
+
+  memset(sub, 0, 4 * 8);
+  memcpy(sub[0], &pb[0], 7);
+  memcpy(sub[1], &pb[7], 7);
+  sub[0][7] = bch_ecc(sub[0], 7);
+  sub[1][7] = bch_ecc(sub[1], 7);
+  sub[2][7] = bch_ecc(sub[2], 7); // zero data still gets parity
+  sub[3][7] = bch_ecc(sub[3], 7);
+}
+
 void DVHSTXTurbo::build_frame_commands() {
   uint32_t *p = frame_cmd_buffer;
 
@@ -53,8 +172,49 @@ void DVHSTXTurbo::build_frame_commands() {
     *p++ = s_h1;
   };
 
+  // In HDMI mode, the first vblank line carries the AVI InfoFrame in a
+  // data island. Put the whole island inside the hsync pulse, after a
+  // short control period, so HSYNC is stable before the data-island
+  // preamble and remains stable through both guard bands and the packet.
+  if (hdmi_mode) {
+    uint8_t header[4], sub[4][8];
+    hdmi_build_avi_packet(disp_width == 720 ? 3 : 1, // VIC 3 / VIC 1
+                          disp_width == 720 ? 2 : 1, // 16:9 / 4:3
+                          header, sub);
+    const uint32_t hv = 0b10; // V inactive high, H active low
+    const uint32_t di_guard =
+        terc4_syms[0b1100 | hv] | (0x133u << 10) | (0x133u << 20);
+
+    constexpr uint32_t sync_settle_clocks = 4;
+    constexpr uint32_t island_sync_clocks =
+        sync_settle_clocks + 8 + 2 + 32 + 2;
+    if (timing->h_sync_width < island_sync_clocks)
+      panic("HSYNC width %u is too short for HDMI data island",
+            timing->h_sync_width);
+
+    *p++ = HSTX_CMD_RAW_REPEAT | timing->h_front_porch;
+    *p++ = SYNC_V1_H1;
+    *p++ = HSTX_CMD_RAW_REPEAT | sync_settle_clocks;
+    *p++ = SYNC_V1_H0;
+    *p++ = HSTX_CMD_RAW_REPEAT | 8;
+    *p++ = HDMI_DI_PREAMBLE(TMDS_CTRL_10);
+    *p++ = HSTX_CMD_RAW_REPEAT | 2;
+    *p++ = di_guard;
+    *p++ = HSTX_CMD_RAW | 32;
+    hdmi_encode_packet_words(header, sub, hv, p);
+    p += 32;
+    *p++ = HSTX_CMD_RAW_REPEAT | 2;
+    *p++ = di_guard;
+    *p++ = HSTX_CMD_RAW_REPEAT |
+           (timing->h_sync_width - island_sync_clocks);
+    *p++ = SYNC_V1_H0;
+    *p++ = HSTX_CMD_RAW_REPEAT |
+           (timing->h_back_porch + timing->h_active_pixels);
+    *p++ = SYNC_V1_H1;
+  }
+
   // Frame starts at the vertical front porch, same convention as DVHSTX.
-  for (int i = 0; i < timing->v_front_porch; i++)
+  for (int i = hdmi_mode ? 1 : 0; i < timing->v_front_porch; i++)
     put_vblank_line(false);
   for (int i = 0; i < timing->v_sync_width; i++)
     put_vblank_line(true);
@@ -68,19 +228,37 @@ void DVHSTXTurbo::build_frame_commands() {
     *p++ = SYNC_V1_H1;
     *p++ = HSTX_CMD_RAW_REPEAT | timing->h_sync_width;
     *p++ = SYNC_V1_H0;
-    *p++ = HSTX_CMD_RAW_REPEAT | timing->h_back_porch;
-    *p++ = SYNC_V1_H1;
+    if (hdmi_mode) {
+      // HDMI requires an 8-clock video preamble + 2-clock guard band
+      // immediately before every active video period; carve them out of
+      // the back porch.
+      *p++ = HSTX_CMD_RAW_REPEAT | (timing->h_back_porch - 10);
+      *p++ = SYNC_V1_H1;
+      *p++ = HSTX_CMD_RAW_REPEAT | 8;
+      *p++ = HDMI_VIDEO_PREAMBLE(TMDS_CTRL_11);
+      *p++ = HSTX_CMD_RAW_REPEAT | 2;
+      *p++ = HDMI_VIDEO_GUARD;
+    } else {
+      *p++ = HSTX_CMD_RAW_REPEAT | timing->h_back_porch;
+      *p++ = SYNC_V1_H1;
+    }
     *p++ = HSTX_CMD_TMDS | timing->h_active_pixels;
     if (y == 0)
       frame_pixels_base = (uint8_t *)p;
     p += pixel_words; // pixel bytes, left blank here (calloc'd to 0)
   }
+
+  // Record the generated size. init() compares it with the DMA transfer
+  // length before scanout starts.
+  emitted_words = (uint32_t)(p - frame_cmd_buffer);
 }
 
 bool DVHSTXTurbo::init(uint16_t width, uint16_t height,
-                       const DVHSTXPinout &pinout) {
+                       const DVHSTXPinout &pinout, bool hdmi) {
   if (inited)
     reset();
+
+  hdmi_mode = hdmi;
 
   if (width == 720 && height == 480)
     timing = &dvi_timing_720x480p_60hz;
@@ -95,10 +273,14 @@ bool DVHSTXTurbo::init(uint16_t width, uint16_t height,
 
   const int v_blank_lines =
       timing->v_front_porch + timing->v_sync_width + timing->v_back_porch;
-  frame_words = (uint32_t)v_blank_lines * VBLANK_LINE_WORDS +
+  // HDMI: island line is 47 words instead of 6, active headers gain the
+  // video preamble + guard band (4 words).
+  const int island_extra = hdmi_mode ? (47 - VBLANK_LINE_WORDS) : 0;
+  const int header_words = ACTIVE_HEADER_WORDS + (hdmi_mode ? 4 : 0);
+  frame_words = (uint32_t)v_blank_lines * VBLANK_LINE_WORDS + island_extra +
                 (uint32_t)timing->v_active_lines *
-                    (ACTIVE_HEADER_WORDS + pixel_words);
-  row_stride = (ACTIVE_HEADER_WORDS + pixel_words) * sizeof(uint32_t);
+                    (header_words + pixel_words);
+  row_stride = (header_words + pixel_words) * sizeof(uint32_t);
 
   // calloc so the pixel regions start black
   frame_cmd_buffer = (uint32_t *)calloc(frame_words, sizeof(uint32_t));
@@ -106,6 +288,12 @@ bool DVHSTXTurbo::init(uint16_t width, uint16_t height,
     return false;
 
   build_frame_commands();
+  if (emitted_words != frame_words) {
+    // layout math and emission disagree -- refuse to stream garbage
+    free(frame_cmd_buffer);
+    frame_cmd_buffer = nullptr;
+    return false;
+  }
 
   setup_hstx_clock();
 

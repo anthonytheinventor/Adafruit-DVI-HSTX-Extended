@@ -1,159 +1,251 @@
-# Adafruit DVI HSTX Extended <!-- omit in toc -->
+# Adafruit DVI HSTX Extended
 
-My ([anthonytheinventor](https://github.com/anthonytheinventor)) fork of Adafruit's `Adafruit_dvhstx` library — an Adafruit GFX compatible DVI driver for RP2 chips with HSTX (Adafruit Metro RP2350, Adafruit Fruit Jam, etc). The headline additions are a **zero-ISR "turbo" mode** that generates a rock-solid 720x480 or 640x480 DVI signal with no CPU involvement whatsoever, and a **scatter-gather DMA blitter** (`blitRows()`) for presenting off-screen-composed content in a fraction of a millisecond. The fork also adds a 4bpp indexed-color mode, a native 720x480 resolution for the standard driver, and DMA-path performance work. All credit for the original driver goes to Jeff Epler / Adafruit and the Pimoroni `dvhstx` driver underneath it.
+A fork of Adafruit's `Adafruit_dvhstx` library for RP2350 boards with the HSTX peripheral, including the Adafruit Feather RP2350, Metro RP2350, and Fruit Jam.
 
-**Important note on overclocking:** This library overclocks your RP2 chip to 240MHz just by including `<Adafruit_dvhstx_extended.h>`, separate from the Tools menu setting (which must stay at 150MHz). Like any overclock, there's some risk to component lifespan that's hard to quantify. Proceed at your own discretion.
+This fork adds:
 
-- [The turbo mode and the blitter](#the-turbo-mode-and-the-blitter)
-- [Supported modes and resolutions](#supported-modes-and-resolutions)
-- [Why this fork exists](#why-this-fork-exists)
-- [New features](#new-features)
-- [Performance improvements](#performance-improvements)
-- [Hardening](#hardening)
+- `DVHSTX4`: 4-bit indexed color with 16 palette entries
+- native 720x480 timing for the standard scanline driver
+- `DVHSTX8Turbo`: single-buffered RGB332 output with DMA-only scanout
+- `blitRows()`: DMA-assisted row copies into the turbo framebuffer
+- optional HDMI AVI InfoFrame signaling for 720x480 anamorphic output
+- deeper DMA buffering and faster scanline conversion paths
+
+The original driver was written by Jeff Epler and Adafruit and is based on Pimoroni's `dvhstx` driver.
+
+> **Clock requirement:** Including `<Adafruit_dvhstx_extended.h>` configures the RP2350 system clock to 240 MHz. Leave the Arduino IDE CPU-speed setting at 150 MHz. This is an overclock and may not be suitable for every board or application.
+
+## Contents
+
+- [Choosing a display class](#choosing-a-display-class)
+- [Turbo mode](#turbo-mode)
+- [Supported resolutions](#supported-resolutions)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [Documentation](#documentation)
+- [Direct framebuffer access](#direct-framebuffer-access)
+- [Examples](#examples)
+- [Diagnostics and implementation notes](#diagnostics-and-implementation-notes)
 
-## The turbo mode and the blitter
+## Choosing a display class
 
-**`DVHSTX8Turbo` is a display mode with no interrupt handler.** Every other mode in this library (and in the original) works the same basic way: a per-scanline ISR feeds pixel data to the HSTX peripheral through a ring of line buffers, and if anything blocks interrupts for too long — heavy USB host traffic, flash writes, a long `noInterrupts()` section — the ring runs dry and the picture drops out. The 8-deep ring in this fork raises that tolerance a lot, but the failure mode still exists; it's just further away.
+| Class | Pixel format | Colors | Buffering | Typical use |
+|---|---|---:|---|---|
+| `DVHSTX16` | RGB565 | 65,536 | single or double | highest color quality when RAM permits |
+| `DVHSTX8` | 8-bit indexed | 256 | single or double | palette graphics |
+| `DVHSTX4` | 4-bit indexed | 16 | single or double | low-RAM dashboards and interfaces |
+| `DVHSTX8Turbo` | RGB332 | 256 direct colors | single only | stable scanout under heavy interrupt load |
+| `DVHSTXText` | character cells with RGB111 attributes | 8 foreground and 8 background colors | single or double | text displays |
 
-Turbo mode removes the failure mode instead of pushing it back. The HSTX command words (sync sequences and pixel-run headers) are unrolled directly into the frame buffer, interleaved with the pixel bytes, and a free-running pair of DMA channels streams the whole thing to the HSTX FIFO forever — one channel moves the frame, the second re-arms the first by writing the buffer address back into its read-address trigger. RGB332 pixels are expanded to full TMDS symbols by the HSTX hardware itself. **No CPU code runs per scanline, per frame, or ever.** There is no ISR to be late, so the DVI signal's integrity is completely decoupled from what your sketch and its interrupts are doing. The scanout DMA is also given bus priority, so even flat-out memory traffic from your code can't starve the feed.
+`DVHSTX16`, `DVHSTX8`, and `DVHSTX4` use the standard scanline driver. An interrupt handler prepares scanlines and feeds them to HSTX through a ring of DMA buffers.
 
-The cost is that it's single-buffered (a second 8bpp buffer doesn't fit in SRAM at these resolutions) and the color format is fixed RGB332 — the pixel byte *is* the color, no palette. Single-buffering is a smaller problem than it sounds, because of the second feature:
+`DVHSTX8Turbo` uses a different layout. It stores HSTX commands and RGB332 pixel data in one frame-sized buffer and streams that buffer continuously with DMA. It does not run a per-scanline or per-frame interrupt handler.
 
-**`blitRows()` is a DMA blitter for presenting composed content.** The turbo frame's rows are strided (28 bytes of command words sit before each pixel row), so `blitRows()` uses a scatter-gather chain — a control DMA channel feeds one {source, destination} pair per row to a data channel — to copy contiguous rows from anywhere in memory into the live frame without ever touching the command words. Compose your content off-screen at your leisure (an SRAM scratch tile, or big assets staged in PSRAM), then present it in one call, synchronously or async. A full-width numeral band lands in a few hundred microseconds; an entire 720x480 frame presents in well under 1ms — fast enough to swap the whole screen inside the vertical blanking interval, which gets you tear-free full-screen updates on a single buffer. Falls back to `memcpy` transparently if the source is unaligned or no DMA channels are free, and the channels are only claimed on first use.
+## Turbo mode
 
-See `05_turbo_720x480_test` for both in action: a full-screen presentation via `blitRows()` measured every frame (0.7ms on real hardware), with the changing elements drawn inside vblank.
+### How it works
 
-## Supported modes and resolutions
+`DVHSTX8Turbo` builds the complete HSTX command stream during `begin()`. Each active row contains a short command header followed by the row's RGB332 pixel bytes. Two DMA channels loop over the completed frame:
 
-Rows marked **⭐ fork** are additions of this fork and don't exist in Adafruit's original library.
+1. the scanout channel transfers the frame to the HSTX FIFO;
+2. the restart channel resets the scanout channel's read address at the end of the frame.
 
-### Display modes
+This design removes scanline preparation from the CPU. Interrupt latency from USB, storage, networking, or application code does not delay scanout command generation.
 
-| Class | Mode | Colors | RAM per pixel | Buffering | |
-|---|---|---|---|---|---|
-| `DVHSTX16` | RGB565 | 65,536 direct | 2 bytes | single or double | |
-| `DVHSTX8` | 8bpp indexed | 256-entry RGB888 palette | 1 byte | single or double | |
-| `DVHSTX4` | 4bpp indexed | 16-entry RGB888 palette | 1/2 byte | single or double | **⭐ fork** |
-| `DVHSTX8Turbo` | 8bpp RGB332, zero-ISR | 256 direct (rrrgggbb) | 1 byte | single only | **⭐ fork** |
-| `DVHSTXText` | text, RGB111 attributes | 8 fg / 8 bg colors | 2 bytes per cell | single or double | |
+### Limitations
 
-`DVHSTX16`, `DVHSTX8`, and `DVHSTX4` accept any resolution in the first table below, RAM permitting. `DVHSTX8Turbo` supports exactly the two resolutions in the second table. `DVHSTXText` is fixed at 91x30 characters on a 1280x720 signal.
+- RGB332 only
+- single-buffered only
+- 720x480 and 640x480 only
+- framebuffer rows are strided because HSTX command words are stored between pixel rows
 
-### Resolutions (`DVHSTX16` / `DVHSTX8` / `DVHSTX4`)
+At 720x480, a second full RGB332 framebuffer does not fit comfortably in internal SRAM. For staged rendering, compose into a smaller SRAM buffer or PSRAM and copy completed rows with `blitRows()`.
 
-Framebuffer sizes are for a single buffer; double buffering doubles them. The RP2350 has 520KB of SRAM and the heap shares it with your sketch, so treat anything within ~40KB of the ceiling as unlikely to fit.
+### `blitRows()`
 
-| Resolution | Actual signal | Aspect | 4bpp | 8bpp | 16bpp | |
-|---|---|---|---|---|---|---|
-| `320x180` | 1280x720 @50Hz (4x4) | 16:9 | 28KB | 56KB | 113KB | |
-| `640x360` | 1280x720 @50Hz (2x2) | 16:9 | 113KB | 225KB | 450KB | |
-| `480x270` | 1920x1080 @30Hz (4x4) | 16:9 | 63KB | 127KB | 253KB | |
-| `400x225` | 800x450 @60Hz (2x2) | 16:9 | 44KB | 88KB | 176KB | |
-| `320x240` | 640x480 @60Hz (2x2) | 4:3 | 38KB | 75KB | 150KB | |
-| `640x480` | 640x480 @60Hz (native) | 4:3 | 150KB | 300KB | won't fit | |
-| `360x240` | 720x480 @60Hz (2x2) | 3:2 | 42KB | 84KB | 169KB | |
-| `720x480` | 720x480 @60Hz (native, CEA-861) | 4:3* | 169KB | 338KB | won't fit | **⭐ fork** |
-| `360x200` | 720x400 @70Hz (2x2) | 9:5 | 35KB | 70KB | 141KB | |
-| `720x400` | 720x400 @70Hz (native) | 9:5 | 141KB | 281KB | won't fit | |
-| `360x288` | 720x576 @50Hz (2x2) | 5:4 | 51KB | 101KB | 203KB | |
-| `400x300` | 800x600 @60Hz (2x2) | 4:3 | 59KB | 117KB | 234KB | |
-| `512x384` | 1024x768 @60Hz (2x2) | 4:3 | 96KB | 192KB | 384KB | |
-| `400x240` | 800x480 @60Hz (2x2) | 5:3 | 47KB | 94KB | 188KB | |
+```cpp
+bool blitRows(int y, const uint8_t *src, int nRows, bool block = true);
+```
 
-Enum names are `DVHSTX_RESOLUTION_<WxH>`. "(2x2)"/"(4x4)" is the pixel repetition applied in both axes to produce the signal. *720x480 is a 16:9 anamorphic TV mode, but DVI can't signal that, so most displays show it 4:3 — use the display's stretch setting.
+`src` contains tightly packed rows of `display.width()` bytes each. The function copies them into the strided turbo framebuffer without overwriting the HSTX command words between rows.
 
-### Turbo resolutions (`DVHSTX8Turbo`)
+When the source is 4-byte aligned and DMA channels are available, the driver uses a scatter-gather DMA transfer. Otherwise it uses `memcpy()` row by row.
 
-Zero-ISR scanout: HSTX command words are unrolled into the frame buffer and streamed by a free-running DMA pair — no per-scanline CPU work, so display underruns from blocked interrupts are structurally impossible. Sizes include the interleaved command words. Single-buffered only.
+For asynchronous copies, pass `false` for `block`, then use:
 
-| Resolution | Actual signal | Frame buffer | |
-|---|---|---|---|
-| `720x480` (default) | 720x480 @60Hz (native, CEA-861) | 352KB | **⭐ fork** |
-| `640x480` | 640x480 @60Hz (native, VESA) | 314KB | **⭐ fork** |
+```cpp
+if (!display.blitBusy()) {
+  // The source buffer can be reused.
+}
 
-640x480 is the mandatory base mode every DVI/HDMI display must support — the fallback for picky monitors.
+display.blitWait();
+```
 
-Turbo mode also provides `blitRows()` — a scatter-gather DMA copy of contiguous rows into the strided frame (sync or async), for presenting content composed off-screen in SRAM or PSRAM without per-pixel drawing into the live buffer.
+Do not modify or free the source buffer while an asynchronous copy is active.
 
-## Why this fork exists
+### Optional HDMI signaling
 
-I wanted a high-resolution color dashboard driven by an RP2350 — enough pixels to show real data at a glance on a TV, in color, without flicker. That ambition ran into the chip's constraints from two directions, and the two halves of this fork are the answers.
+Turbo mode defaults to DVI-compatible output:
 
-The first constraint is RAM. The RP2350 has 520KB, and a double-buffered framebuffer at the original library's 8bpp color mode gets expensive fast — 720x480 at 8bpp double-buffered doesn't fit at all. Double buffering matters for a dashboard that redraws constantly, or it will flicker and tear. Dropping to 4bpp (16 colors) cuts the framebuffer cost in half, which is what makes a double-buffered native 720x480 display possible. That's `DVHSTX4` and the native 720x480 timing.
+```cpp
+DVHSTX8Turbo display(DVHSTX_PINOUT_DEFAULT,
+                     DVHSTX_RESOLUTION_720x480);
+```
 
-The second constraint is that a display node in a real system doesn't get to *just* be a display. Mine also services USB, radios, and sensors — interrupt-driven work that's bursty and not always polite. In the ISR-fed display modes, every interrupt source in the sketch is implicitly part of the video signal path: block interrupts a little too long and the scanline ring underruns and the picture drops. I widened the ring to push that boundary out, but I kept designing around it — auditing every library for interrupt behavior, being paranoid about `noInterrupts()`. The turbo mode is the escape from that whole class of problem: the DVI signal is generated entirely by DMA hardware with zero CPU involvement, so the CPU is free to take as many interrupts as the application wants, for as long as they take, without ever compromising signal integrity. The display can't glitch because of software, full stop — which is exactly the property you want when the display is bolted to a wall doing a job. The result is a more reliable system *and* a simpler one: one less real-time constraint to design the rest of the firmware around.
+Pass `true` as the third argument to enable experimental HDMI signaling:
 
-## New features
+```cpp
+DVHSTX8Turbo display(DVHSTX_PINOUT_DEFAULT,
+                     DVHSTX_RESOLUTION_720x480,
+                     true);
+```
 
-Stuff that doesn't exist in the original library:
+The HDMI mode adds video preambles, guard bands, and one AVI InfoFrame per frame. At 720x480, the InfoFrame declares:
 
-- **`MODE_PALETTE4`**: a new 4bpp indexed-color mode — 16 colors, 2 pixels per byte, half the RAM of the original 8bpp palette mode at the same resolution.
-- **`DVHSTX4`**: the Arduino-facing canvas class for that mode, with the same API as `DVHSTX8`/`DVHSTX16` (`setColor()`, `drawPixel()`/`getPixel()`, double-buffered `swap()`).
-- **Native 720x480** (`DVHSTX_RESOLUTION_720x480`), using real CEA-861 NTSC timing pulled from a display's EDID and checked on hardware. Full resolution, not pixel-doubled like the original library's `DVHSTX_RESOLUTION_360x240` — and it only fits in RAM at 4bpp.
-- **Palette lookup caching**: `rebuild_palette4_cache()` precomputes two 256-entry lookup tables so the DMA path is a straight lookup per pixel, no bit-shifting. Runs automatically on `init()` and `DVHSTX4::setColor()`.
-- **Two new examples**: `03_4bpp_test` and `04_720x480_test`.
-- **`DVHSTX8Turbo`** (1.2.0; 640x480 added in 1.3.0) and **`blitRows()`** (1.4.0): the zero-ISR turbo mode and its DMA blitter — see [the section above](#the-turbo-mode-and-the-blitter). Implementation details worth knowing: rows are strided (28 bytes of command words precede each pixel row; `drawPixel`/`fillRect` handle it, `rowAddr()`/`rowStride()` expose it), and the scanout channel takes both fabric-level (`bus_ctrl`) and DMA-internal high priority. Ships with example `05_turbo_720x480_test`.
+- VIC 3
+- 16:9 picture aspect
+- active format equal to the coded frame
+- full-range RGB
+- underscan preference
+- IT/graphics content
 
-## Performance improvements
+Display behavior varies. Some televisions honor all fields, some honor only the aspect ratio, and some use their per-input picture settings instead. Pure DVI monitors may not accept HDMI data-island symbols, so HDMI signaling remains opt-in.
 
-These speed up the DMA scanline fill for the original library's `MODE_PALETTE` (8bpp) and `MODE_RGB565` (16bpp) modes too, not just the new 4bpp one. Nothing about how you use those modes changes — they just run faster:
+HDMI mode increases the active-row command header from 28 to 44 bytes and adds approximately 8 KiB to the frame allocation.
 
-- **Word-aligned reads**: the scanline fill used to read the framebuffer one byte (or one 16-bit pixel for RGB565) at a time. It now reads 4 bytes at once and unpacks from there — roughly 4x fewer loads for 4bpp/8bpp, 2x fewer for RGB565. Safe because every supported resolution is a multiple of 8 pixels wide, so a row is always a whole number of 4-byte words.
-- **Pointer-bound loops**: those same loops compare the destination pointer to a precomputed end pointer instead of counting with an integer.
-- **Fast line drawing in `DVHSTX4`**: `drawFastHLine`/`drawFastVLine` route through the byte-wise `fillRect` fast path, so Adafruit_GFX primitives built on them (`drawLine`, `drawRect`, `drawCircle`, etc.) don't fall back to pixel-by-pixel drawing.
-- **Deeper DMA ring (3 → 8 scanline buffers)**: raises tolerance for interrupt-blocked stretches from ~95us to ~250us, fixing display dropouts caused by heavy USB host traffic.
-- **Scratch Y for the 4bpp lookup tables**: `palette4_hi`/`palette4_lo` live in Scratch Y, a small dedicated SRAM bank, so the DMA ISR's per-pixel reads aren't fighting the DMA controller for bus access on the same striped SRAM. The 8bpp palette stays in normal SRAM — Scratch Y is only 4KB and a default 2KB core1 stack already lives there.
+## Supported resolutions
 
-## Hardening
+### Standard scanline driver
 
-- **Checked allocations**: frame buffer and line buffer `malloc()` failures are detected and cleaned up, and `begin()` returns `false` instead of running with a null buffer.
-- **Dynamic DMA channels**: the driver claims channels through the SDK instead of hardcoding channels 0-2, so it can't collide with other DMA users. Channels are released on `end()`.
-- **Underrun diagnostics**: the scanline ISR counts late services (`late_isr_count` / `max_pending`, readable via `display.driver()`), so DMA-starvation issues can be measured instead of guessed at.
+Framebuffer sizes below are for one buffer. Double buffering doubles the framebuffer allocation. The RP2350 has 520 KiB of internal SRAM shared by the framebuffer, heap, stacks, DMA structures, and application data.
+
+| Resolution | Output timing | Nominal aspect | 4 bpp | 8 bpp | 16 bpp |
+|---|---|---:|---:|---:|---:|
+| 320x180 | 1280x720 at 50 Hz, 4x repetition | 16:9 | 28 KiB | 56 KiB | 113 KiB |
+| 640x360 | 1280x720 at 50 Hz, 2x repetition | 16:9 | 113 KiB | 225 KiB | 450 KiB |
+| 480x270 | 1920x1080 at 30 Hz, 4x repetition | 16:9 | 63 KiB | 127 KiB | 253 KiB |
+| 400x225 | 800x450 at 60 Hz, 2x repetition | 16:9 | 44 KiB | 88 KiB | 176 KiB |
+| 320x240 | 640x480 at 60 Hz, 2x repetition | 4:3 | 38 KiB | 75 KiB | 150 KiB |
+| 640x480 | 640x480 at 60 Hz | 4:3 | 150 KiB | 300 KiB | does not fit |
+| 360x240 | 720x480 at 60 Hz, 2x repetition | 3:2 | 42 KiB | 84 KiB | 169 KiB |
+| 720x480 | 720x480 at 60 Hz | 4:3 over DVI* | 169 KiB | 338 KiB | does not fit |
+| 360x200 | 720x400 at 70 Hz, 2x repetition | 9:5 | 35 KiB | 70 KiB | 141 KiB |
+| 720x400 | 720x400 at 70 Hz | 9:5 | 141 KiB | 281 KiB | does not fit |
+| 360x288 | 720x576 at 50 Hz, 2x repetition | 5:4 | 51 KiB | 101 KiB | 203 KiB |
+| 400x300 | 800x600 at 60 Hz, 2x repetition | 4:3 | 59 KiB | 117 KiB | 234 KiB |
+| 512x384 | 1024x768 at 60 Hz, 2x repetition | 4:3 | 96 KiB | 192 KiB | 384 KiB |
+| 400x240 | 800x480 at 60 Hz, 2x repetition | 5:3 | 47 KiB | 94 KiB | 188 KiB |
+
+Resolution constants use the form `DVHSTX_RESOLUTION_<width>x<height>`.
+
+\* The 720x480 timing can represent anamorphic 16:9 video, but ordinary DVI output does not carry the aspect-ratio metadata. Use the optional turbo HDMI mode or the display's aspect control when widescreen presentation is required.
+
+### Turbo driver
+
+Sizes include interleaved HSTX command words.
+
+| Resolution | Output timing | DVI allocation | HDMI allocation |
+|---|---|---:|---:|
+| 720x480 | 720x480 at 60 Hz | about 352 KiB | about 360 KiB |
+| 640x480 | 640x480 at 60 Hz | about 314 KiB | about 322 KiB |
 
 ## Installation
 
-1. Download the zip from the [Releases](https://github.com/anthonytheinventor/Adafruit-DVI-HSTX-Extended/releases) page (don't unzip it).
-2. In the Arduino IDE: **Sketch → Include Library → Add .ZIP Library...** and select the downloaded file.
-3. Restart the IDE if the examples don't show up right away. You'll find them under **File → Examples → Adafruit DVI HSTX Extended**.
+1. Download the release ZIP from the project's Releases page.
+2. In Arduino IDE, choose **Sketch → Include Library → Add .ZIP Library...**.
+3. Select the downloaded ZIP.
+4. Restart Arduino IDE if the examples do not appear immediately.
 
-This fork installs cleanly alongside Adafruit's original library — the main header is renamed to `Adafruit_dvhstx_extended.h` so the Arduino IDE never confuses the two. Just make sure your sketch includes the right one:
+The fork can be installed beside Adafruit's original library because it uses a different public header:
 
 ```cpp
-#include <Adafruit_dvhstx_extended.h>   // this fork
+#include <Adafruit_dvhstx_extended.h>
 ```
 
 ## Quick start
 
-A double-buffered 16-color display at native 720x480:
+The following example creates a double-buffered, 16-color, native 720x480 display:
 
 ```cpp
 #include <Adafruit_dvhstx_extended.h>
 
-// If your board defines PIN_CKP etc. (Feather/Metro RP2350, Fruit Jam),
-// DVHSTX_PINOUT_DEFAULT just works. Otherwise pass pins as {CKP, D0P, D1P, D2P}.
-DVHSTX4 display(DVHSTX_PINOUT_DEFAULT, DVHSTX_RESOLUTION_720x480, true);
+DVHSTX4 display(DVHSTX_PINOUT_DEFAULT,
+                DVHSTX_RESOLUTION_720x480,
+                true);
 
 void setup() {
-  if (!display.begin()) for (;;); // out of RAM or unsupported resolution
+  if (!display.begin()) {
+    for (;;) {
+      tight_loop_contents();
+    }
+  }
 
-  display.setColor(1, 0xFF0000);  // palette slot 1 = red
+  display.setColor(0, 0x000000);
+  display.setColor(1, 0xFF0000);
+
   display.fillScreen(0);
   display.fillRect(20, 20, 200, 100, 1);
-  display.swap();                 // present the frame
+  display.swap();
 }
 
 void loop() {}
 ```
 
-Draw with any Adafruit_GFX call — colors are palette indices 0-15. See `04_720x480_test` for a full example with per-frame redraws and render timing.
+Colors passed to `DVHSTX4` drawing functions are palette indices from 0 through 15.
 
-## Documentation
+For boards that define `PIN_CKP`, `PIN_D0P`, `PIN_D1P`, and `PIN_D2P`, use `DVHSTX_PINOUT_DEFAULT`. Otherwise provide the positive pin of each differential pair:
 
-The examples should work unmodified on the Adafruit Feather RP2350, Metro RP2350, and Fruit Jam, or any board that defines `PIN_CKP`, `PIN_D0P`, `PIN_D1P`, and `PIN_D2P` — just use `DVHSTX_PINOUT_DEFAULT`.
+```cpp
+DVHSTXPinout pinout = {clock_positive, data0_positive,
+                       data1_positive, data2_positive};
+```
 
-Otherwise, give the pinout as 4 numbers: `{ckp, d0p, d1p, d2p}` — the GPIO numbers for the clock pair's positive pin, then the positive pins of the D0/D1/D2 pairs.
+## Direct framebuffer access
 
-One note on the native 720x480 mode: this library is DVI-only, so it doesn't send the HDMI flag that marks 720x480 as 16:9 anamorphic. Most TVs will show it as 4:3 by default; use the TV's stretch/zoom setting if you want widescreen.
+The standard canvas classes use contiguous framebuffers. Turbo rows are not contiguous because command words are stored between rows.
+
+Use these methods instead of hard-coding a stride:
+
+```cpp
+uint8_t *row = display.rowAddr(y);
+size_t stride = display.rowStride();
+```
+
+A pixel can then be addressed as:
+
+```cpp
+uint8_t *base = display.rowAddr(0);
+base[(size_t)y * display.rowStride() + x] = color;
+```
+
+Do not write into the gap between the end of one row's pixels and the start of the next row.
+
+## Examples
+
+- `00simpletest`: RGB565 graphics
+- `01palettetest`: 8-bit indexed color
+- `02texttest`: text mode
+- `03_4bpp_test`: 4-bit indexed color
+- `04_720x480_test`: native 720x480 with `DVHSTX4`
+- `05_turbo_720x480_test`: turbo scanout, RGB332 drawing, vertical-blank synchronization, and `blitRows()`
+
+## Diagnostics and implementation notes
+
+### Standard-driver underrun counters
+
+The standard scanline driver records late interrupt service events:
+
+```cpp
+auto &driver = display.driver();
+uint32_t late = driver.late_isr_count;
+uint32_t peak = driver.max_pending;
+```
+
+These counters help identify applications that block interrupts long enough to exhaust the scanline ring.
+
+### DMA allocation
+
+DMA channels are claimed dynamically and released by `end()`. Turbo scanout also raises DMA and bus priority while active, then restores normal arbitration during `reset()`.
+
+### Allocation failures
+
+`begin()` returns `false` if a framebuffer, line buffer, or required DMA resource cannot be allocated. Check its return value before drawing.

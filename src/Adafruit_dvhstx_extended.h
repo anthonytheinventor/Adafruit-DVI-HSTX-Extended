@@ -187,6 +187,7 @@ public:
 private:
   DVHSTXPinout pinout;
   DVHSTXResolution res;
+  bool hdmi;
   mutable pimoroni::DVHSTX hstx;
   bool double_buffered;
 };
@@ -271,6 +272,7 @@ public:
 private:
   DVHSTXPinout pinout;
   DVHSTXResolution res;
+  bool hdmi;
   mutable pimoroni::DVHSTX hstx;
   bool double_buffered;
 };
@@ -379,7 +381,7 @@ public:
     if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height))
       return;
 
-    // same rotation transform Adafruit_GFX canvases use
+    // Apply the same rotation transform used by Adafruit_GFX canvases.
     int16_t t;
     switch (rotation) {
     case 1:
@@ -570,6 +572,7 @@ public:
 private:
   DVHSTXPinout pinout;
   DVHSTXResolution res;
+  bool hdmi;
   mutable pimoroni::DVHSTX hstx;
   bool double_buffered;
   uint8_t *buffer = nullptr;
@@ -763,6 +766,7 @@ public:
 private:
   DVHSTXPinout pinout;
   DVHSTXResolution res;
+  bool hdmi;
   mutable pimoroni::DVHSTX hstx;
   bool double_buffered;
   bool cursor_visible = false;
@@ -776,23 +780,20 @@ private:
   }
 };
 
-/// 8-bit RGB332 "turbo" canvas for DVI output (720x480 or 640x480).
+/// 8-bit RGB332 turbo canvas for 720x480 or 640x480 output.
 ///
-/// No per-scanline ISR: the HSTX command words are unrolled into the
-/// framebuffer itself and a free-running DMA pair streams the whole frame
-/// forever, with the HSTX TMDS encoder expanding RGB332 in hardware.
-/// Display underruns from blocked interrupts (the failure mode the
-/// 8-deep DMA ring in the other classes defends against) are structurally
-/// impossible here -- there is no ISR to be late.
+/// HSTX command words and pixel data share a frame-sized buffer that is
+/// streamed repeatedly by DMA. The HSTX TMDS encoder expands RGB332 pixels
+/// in hardware, so scanout does not require a per-scanline interrupt handler.
 ///
 /// Trade-offs versus DVHSTX8:
 ///  - Single-buffered only (~352KB at 720x480, ~314KB at 640x480; a
 ///    second buffer does not fit in SRAM).
 ///  - Fixed RGB332 color instead of a 256-entry palette: the pixel byte
 ///    IS the color (rrrgggbb). Use color332() to build values.
-///  - Rows are strided: 28 bytes of command words precede each pixel
-///    row. drawPixel/fillRect handle this; for direct blits use
-///    rowAddr() and rowStride().
+///  - Rows are strided: command words sit between pixel rows (28 bytes
+///    in DVI mode, 44 bytes in HDMI mode). drawPixel/fillRect handle this;
+///    for direct blits use rowAddr() and rowStride().
 class DVHSTX8Turbo : public Adafruit_GFX {
 public:
   /**************************************************************************/
@@ -801,12 +802,23 @@ public:
      @param    pinout Details of the HSTX pinout
      @param    res   Display resolution -- DVHSTX_RESOLUTION_720x480
      (default) or DVHSTX_RESOLUTION_640x480 (other values fail in begin())
+     @param    hdmi  false (default): pure DVI output, maximum monitor
+     compatibility. true (EXPERIMENTAL): transmit HDMI data islands -- an
+     AVI InfoFrame declaring the video format (VIC 3 / 16:9 anamorphic at
+     720x480, VIC 1 / 4:3 at 640x480), full-range RGB, underscan, and
+     IT/graphics content. May help 720x480 display better on TVs that
+     don't scale it properly on their own; TV behavior varies and some
+     ignore the InfoFrame. Uses ~8KB more RAM (wider command stream; row
+     stride 44 bytes instead of 28). May confuse pure DVI monitors, hence
+     opt-in. The islands are generated during initialization and stored in
+     the static command stream. This option does not change DVI mode.
   */
   /**************************************************************************/
   DVHSTX8Turbo(DVHSTXPinout pinout,
-               DVHSTXResolution res = DVHSTX_RESOLUTION_720x480)
+               DVHSTXResolution res = DVHSTX_RESOLUTION_720x480,
+               bool hdmi = false)
       : Adafruit_GFX(dvhstx_width(res), dvhstx_height(res)), pinout(pinout),
-        res{res} {}
+        res{res}, hdmi{hdmi} {}
   ~DVHSTX8Turbo() { end(); }
 
   /**************************************************************************/
@@ -817,7 +829,7 @@ public:
   */
   /**************************************************************************/
   bool begin() {
-    if (!hstx.init(dvhstx_width(res), dvhstx_height(res), pinout))
+    if (!hstx.init(dvhstx_width(res), dvhstx_height(res), pinout, hdmi))
       return false;
     pixels0 = hstx.row(0);
     stride = hstx.row_stride_bytes();
@@ -863,7 +875,7 @@ public:
     if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height))
       return;
 
-    // same rotation transform Adafruit_GFX canvases use
+    // Apply the same rotation transform used by Adafruit_GFX canvases.
     int16_t t;
     switch (rotation) {
     case 1:
@@ -950,9 +962,8 @@ public:
     if (!pixels0)
       return;
     if (rotation != 0) {
-      // no fast path for rotation; don't call Adafruit_GFX::fillRect()
-      // here -- it loops drawFastVLine(), which we route back to
-      // fillRect(): infinite recursion.
+      // Adafruit_GFX::fillRect() calls drawFastVLine(), which this class
+      // routes back to fillRect(). Use direct pixel writes for rotation.
       for (int16_t row = y; row < y + h; row++)
         for (int16_t col = x; col < x + w; col++)
           drawPixel(col, row, color);
@@ -1033,14 +1044,13 @@ public:
   /**************************************************************************/
   /*!
      @brief    Copy rows of pixels from a contiguous staging buffer into
-     the frame, via a scatter-gather DMA chain (one control block per row,
-     so the command words between rows are never touched). This is the
-     fast path for presenting content composed off-screen -- in SRAM
-     scratch or PSRAM -- without per-pixel drawing into the live buffer.
+     the frame using a scatter-gather DMA chain with one control block per
+     row. The command words between rows are not modified. This is intended
+     for content composed in an SRAM or PSRAM staging buffer.
      Ignores rotation: src rows map to physical rows.
      @param y      First destination row
      @param src    Contiguous buffer, width() bytes per row. 4-byte
-     aligned for the DMA path (falls back to memcpy otherwise)
+     aligned for the DMA path; otherwise the function uses memcpy
      @param nRows  Number of rows to copy (clipped to the display)
      @param block  true (default) waits for completion; false returns
      immediately -- don't touch src or start another blit until
@@ -1070,6 +1080,7 @@ public:
 private:
   DVHSTXPinout pinout;
   DVHSTXResolution res;
+  bool hdmi;
   mutable pimoroni::DVHSTXTurbo hstx;
   uint8_t *pixels0 = nullptr;
   size_t stride = 0;

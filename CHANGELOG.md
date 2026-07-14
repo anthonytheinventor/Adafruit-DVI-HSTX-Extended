@@ -1,57 +1,115 @@
 # Changelog
 
+## [1.5.2] - 2026-07-13
+
+### Changed
+
+- Set the AVI InfoFrame Active Format Information Present bit so the active-format field is valid.
+- Added IT-content and graphics-content signaling while retaining full-range RGB and the underscan preference.
+- Moved the HDMI data island four clocks into the horizontal-sync pulse. The preamble, guard bands, and packet now use constant sync levels.
+- Corrected the data-island preamble to use the H-low control symbol.
+- Updated the HDMI island-line command count from 45 to 47 words.
+- Added a check that the horizontal-sync pulse is long enough to contain the data island.
+- Corrected documentation for turbo row headers: 28 bytes in DVI mode and 44 bytes in HDMI mode.
+
+## [1.5.1] - 2026-07-13
+
+### Fixed
+
+- Added the missing active-line HDMI video preamble and guard band. Their absence in 1.5.0 caused the emitted command stream to differ from the allocated layout and prevented sinks from locking to the signal.
+- Added an initialization check that compares the emitted command count with the DMA transfer size.
+
+## [1.5.0] - 2026-07-13
+
+### Added
+
+- Added optional HDMI signaling to `DVHSTX8Turbo`:
+
+  ```cpp
+  DVHSTX8Turbo display(pinout, resolution, true);
+  ```
+
+- Added one AVI InfoFrame per frame. The packet identifies VIC 3 and 16:9 at 720x480, or VIC 1 and 4:3 at 640x480, and requests full-range RGB and underscan.
+- Added the required HDMI video preambles, guard bands, TERC4 encoding, BCH parity, and InfoFrame checksum generation.
+- Kept DVI-compatible output as the default for monitor compatibility.
+
 ## [1.4.0] - 2026-07-10
 
 ### Added
-- `DVHSTX8Turbo::blitRows(y, src, nRows, block)` (+ `blitBusy()`/`blitWait()`): DMA scatter-gather copy of contiguous pixel rows into the strided frame. A control channel feeds per-row {read, write-trigger} pairs into a data channel through the AL2 alias window, ending on a null trigger, so the interleaved command words between rows are never touched. Synchronous or async; falls back to memcpy for unaligned sources or if no DMA channels are free. Channels are claimed lazily on first use and released in `reset()`. Intended as the presentation primitive for off-screen composition (SRAM scratch or PSRAM staging).
-- Scanout data channel now sets DMA-internal high priority (`channel_config_set_high_priority`) so a flat-out mem-to-mem blit can't add latency to the display feed.
+
+- Added `DVHSTX8Turbo::blitRows()` with `blitBusy()` and `blitWait()`.
+- Added scatter-gather DMA copies from tightly packed source rows into the strided turbo framebuffer.
+- Added synchronous and asynchronous operation.
+- Added a row-by-row `memcpy()` fallback for unaligned sources or unavailable DMA channels.
+- Changed DMA channel allocation for the blitter to occur on first use and release during `reset()`.
+- Set the turbo scanout DMA channel to high priority.
 
 ### Changed
-- Example `05_turbo_720x480_test`: the rainbow fields are precomposed into a 63-row cache at setup (they only contain 63 unique rows) and the per-frame redraw is now pure presentation via `blitRows()` -- no per-pixel work. Also builds with sketch-local `#pragma GCC optimize("O2")`. Expected full-frame present time drops roughly an order of magnitude versus 1.3.0's per-pixel LUT loop.
 
+- Updated `05_turbo_720x480_test` to precompute repeated rainbow rows and present them with `blitRows()`.
 
 ## [1.3.0] - 2026-07-09
 
 ### Added
-- 640x480 support in turbo mode: `DVHSTX8Turbo(pinout, DVHSTX_RESOLUTION_640x480)`. `DVHSTXTurbo::init()` now takes width/height and selects between the 720x480 CEA and 640x480 VESA 60Hz timing tables; the command-stream layout, DMA loop, and RGB332 expander config are resolution-independent. Frame buffer is ~314KB at 640x480 (vs ~352KB at 720x480). 720x480 remains the default.
-- Example `05_turbo_720x480_test` is now width-agnostic (fixed-point hue segmentation, all loops driven by `display.width()`), so switching the constructor to 640x480 renders correctly.
+
+- Added 640x480 support to `DVHSTX8Turbo`.
+- Updated the low-level turbo driver to select either 720x480 CEA timing or 640x480 VESA timing at initialization.
+- Updated `05_turbo_720x480_test` to use the selected display width and height.
 
 ### Changed
-- `DVHSTXTurbo::WIDTH`/`HEIGHT` compile-time constants replaced by runtime `width()`/`height()` accessors.
+
+- Replaced the turbo driver's compile-time `WIDTH` and `HEIGHT` constants with runtime accessors.
 
 ## [1.2.0] - 2026-07-09
 
 ### Added
-- `DVHSTX8Turbo`: zero-ISR 720x480 8bpp RGB332 mode. HSTX command words are unrolled into a whole-frame buffer (pixel bytes interleaved between the sync/TMDS opcodes) and streamed by a free-running two-channel DMA loop -- a data channel paced by `DREQ_HSTX` chains to a restart channel that writes the buffer address back into the data channel's read-address trigger. RGB332 is expanded to full pixels by the HSTX TMDS encoder (`expand_shift` 4x8-bit, lane rotations 0/29/26), so no per-scanline CPU work exists and interrupt-latency underruns are structurally impossible. Single-buffered only (~352KB); rows strided by 748 bytes with the pixel data 28 bytes in.
-- `pimoroni::DVHSTXTurbo` low-level driver (`dvhstx_turbo.hpp/.cpp`) with `row()`, `row_stride_bytes()`, and a polled `wait_for_vsync()` (no IRQ anywhere in this mode).
-- Turbo mode elevates DMA bus priority (`bus_ctrl_hw->priority`, DMA_R|DMA_W) so the naked scanout feed can't be starved by core SRAM traffic during a bank collision -- this is the bus-contention underrun path, distinct from the interrupt-latency one the 8-deep ring guards in the other driver. Restored to fair arbitration on `reset()`.
-- Example `05_turbo_720x480_test`: hue-x-value and hue-x-saturation rainbow fields plus R/G/B ramps, a vblank-synced animated marker, and a timed full-screen redraw every frame (identical-content overwrite -- tear-free in a single buffer) with on-screen ms/frame stats.
-- `keywords.txt` entries for the new class and methods.
+
+- Added `DVHSTX8Turbo`, a single-buffered RGB332 mode for 720x480 output.
+- Added a frame-sized buffer containing both HSTX commands and pixel data.
+- Added a two-channel DMA loop for continuous frame transmission.
+- Added hardware RGB332 expansion through the HSTX TMDS encoder.
+- Added `row()`, `row_stride_bytes()`, and polled vertical-blank synchronization.
+- Added temporary DMA bus priority while turbo scanout is active.
+- Added `05_turbo_720x480_test`.
+- Added Arduino IDE keyword entries for the turbo API.
 
 ## [1.1.0] - 2026-07-08
 
 ### Added
-- Word-aligned framebuffer reads for the original `MODE_PALETTE` (8bpp) and `MODE_RGB565` (16bpp) scanline paths (the 4bpp path already had them in 1.0.0).
-- `drawFastHLine`/`drawFastVLine` overrides in `DVHSTX4` — Adafruit_GFX primitives (`drawLine`, `drawRect`, `drawCircle`, etc.) now use the byte-wise `fillRect` fast path instead of per-pixel drawing.
-- DMA underrun diagnostics: `late_isr_count` and `max_pending` counters on the driver, reachable via `DVHSTX4::driver()`.
-- Compile-time `#error` when building for a non-RP2350 board.
-- Populated `keywords.txt` for Arduino IDE syntax highlighting.
-- README: installation, quick-start, and hardening sections.
+
+- Added word-aligned framebuffer reads to the 8-bit palette and RGB565 scanline paths.
+- Added `drawFastHLine()` and `drawFastVLine()` overrides to `DVHSTX4`.
+- Added `late_isr_count` and `max_pending` diagnostics.
+- Added a compile-time error for non-RP2350 targets.
+- Added Arduino IDE keyword entries.
+- Added installation, quick-start, and diagnostics documentation.
 
 ### Changed
-- DMA scanline ring deepened from 3 to 8 channels, raising interrupt-latency tolerance from ~95us to ~250us. Fixes display dropouts / permanent no-signal under heavy USB host traffic.
-- DMA channels are claimed dynamically through the SDK instead of hardcoding channels 0-2, and are released on `end()`.
-- Pixel-repeat scanline variants use compact loops so the ISR fits in Scratch X at `-O3` (fixes a linker overflow).
-- Rotated `fillRect` falls back to a direct pixel loop.
-- Code comments trimmed throughout.
+
+- Increased the scanline DMA ring from three channels to eight.
+- Changed DMA channel assignment from fixed channel numbers to dynamic allocation.
+- Reduced code size in pixel-repetition scanline routines.
+- Changed rotated `DVHSTX4::fillRect()` to use direct pixel drawing.
+- Simplified source comments.
 
 ### Fixed
-- Unchecked line-buffer allocation: `begin()` now returns `false` on failure instead of running with a null buffer.
-- Stale "264MHz" in the CPU-speed error message (the library sets 240MHz).
+
+- Added allocation checks for line buffers and framebuffers.
+- Corrected the CPU-speed error message from 264 MHz to 240 MHz.
 
 ### Removed
-- Adafruit CI workflow and issue templates (`.github/`) — they require Adafruit-internal credentials and always failed on forks.
+
+- Removed Adafruit-specific CI and issue-template files from the fork.
 
 ## [1.0.0] - 2026-07-01
 
-Initial release. Fork of Adafruit's `Adafruit_dvhstx` adding `MODE_PALETTE4` (4bpp, 16 colors) with the `DVHSTX4` canvas class, native 720x480 (CEA-861) resolution, palette lookup caching, word-aligned 4bpp scanline reads, Scratch Y placement for the 4bpp lookup tables, checked frame-buffer allocation, and two new examples. Header renamed to `Adafruit_dvhstx_extended.h` for side-by-side installs with the original library.
+### Added
+
+- Forked Adafruit's `Adafruit_dvhstx` library under the public header `Adafruit_dvhstx_extended.h`.
+- Added `MODE_PALETTE4` and the `DVHSTX4` canvas class.
+- Added native 720x480 timing.
+- Added cached 4-bit palette lookup tables.
+- Added word-aligned 4-bit scanline reads.
+- Placed the 4-bit lookup tables in Scratch Y.
+- Added framebuffer allocation checks.
+- Added 4-bit and 720x480 examples.

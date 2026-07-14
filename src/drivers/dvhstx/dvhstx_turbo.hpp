@@ -11,27 +11,44 @@ namespace pimoroni {
 
   struct DVHSTXPinout; // dvhstx.hpp
 
-  // "Turbo" 720x480 8bpp RGB332 driver.
+  // DMA-driven 8-bit RGB332 display driver.
   //
   // Unlike DVHSTX, there is no per-scanline ISR and no line buffers. The
   // HSTX command words (sync sequences and TMDS headers) are unrolled into
   // one whole-frame buffer with the pixel bytes interleaved between them.
-  // A free-running pair of DMA channels streams that buffer to the HSTX
-  // FIFO forever; the TMDS encoder expands RGB332 to full pixels in
-  // hardware. No CPU runs per line, so interrupt latency (TinyUSB, etc.)
-  // cannot underrun the display.
+  // A pair of DMA channels repeatedly streams that buffer to the HSTX FIFO.
+  // The HSTX TMDS encoder expands RGB332 pixels in hardware, so scanout does
+  // not depend on per-line CPU service.
   //
   // Costs: single-buffered only (~352KB at 720x480, ~314KB at 640x480;
   // two copies don't fit in SRAM), fixed RGB332 color (the expander's
-  // bit->lane mapping replaces the palette), and rows are strided -- 28
-  // bytes of command words sit before each pixel row. Use row() /
+  // bit->lane mapping replaces the palette), and rows are strided --
+  // command words sit between pixel rows (28 bytes in DVI mode, 44 bytes
+  // in HDMI mode). Use row() /
   // row_stride_bytes() to draw.
   class DVHSTXTurbo {
   public:
     ~DVHSTXTurbo() { reset(); }
 
     // Supported: 720x480 and 640x480 (both CEA/VESA 60Hz timing).
-    bool init(uint16_t width, uint16_t height, const DVHSTXPinout &pinout);
+    //
+    // hdmi=false (default): pure DVI output, maximum monitor
+    // compatibility.
+    // hdmi=true (EXPERIMENTAL): adds HDMI data islands -- an AVI
+    // InfoFrame is transmitted once per frame declaring the video format
+    // (VIC 3, 16:9 anamorphic for 720x480; VIC 1, 4:3 for 640x480),
+    // full-range RGB quantization, underscan, and IT/graphics content.
+    // May help 720x480 display better on TVs that don't scale it
+    // properly on their own; TV behavior varies and some ignore the
+    // InfoFrame entirely. Costs ~8KB extra RAM (wider command stream).
+    // The islands and per-line video guard bands are generated during
+    // initialization and stored in the static command stream. Some pure DVI
+    // monitors may reject the data-island symbols, so this option is disabled
+    // by default. It does not alter the DVI path when false.
+    bool init(uint16_t width, uint16_t height, const DVHSTXPinout &pinout,
+              bool hdmi = false);
+
+    bool is_hdmi() const { return hdmi_mode; }
 
     int width() const { return disp_width; }
     int height() const { return disp_height; }
@@ -85,10 +102,12 @@ namespace pimoroni {
     uint8_t *frame_pixels_base = nullptr; // first pixel byte of row 0
     size_t row_stride = 0;                // bytes, row y -> row y+1
     uint32_t frame_words = 0;
+    uint32_t emitted_words = 0;          // build-time self-check
     uint32_t pixel_words = 0;             // pixel words per active line
     uint32_t active_start_offset = 0;     // byte offset of first active line
     uint16_t disp_width = 0;
     uint16_t disp_height = 0;
+    bool hdmi_mode = false;
 
     // read by the restart DMA channel, holds &frame_cmd_buffer[0]
     uintptr_t restart_read_word = 0;

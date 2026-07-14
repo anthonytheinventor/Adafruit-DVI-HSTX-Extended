@@ -1,15 +1,15 @@
 // 720x480 8bpp RGB332 "turbo" mode on RP2350 HSTX.
 //
 // No per-scanline ISR: HSTX command words are unrolled into the frame
-// buffer and a free-running DMA pair streams the whole frame forever.
+// buffer and a DMA pair repeatedly streams the complete frame.
 // The TMDS encoder expands RGB332 in hardware, so nothing on the CPU can
 // underrun the display -- USB host traffic, long noInterrupts() sections,
 // flash writes, none of it matters.
 //
 // Trade-offs: single-buffered (~352KB, a second buffer won't fit), fixed
-// RGB332 color (no palette), and strided rows (28 bytes of command words
-// before each 720-byte pixel row -- handled by the class, but relevant if
-// you blit directly via rowAddr()/rowStride()).
+// RGB332 color (no palette), and strided rows (28 command bytes in DVI
+// mode, 44 in HDMI mode, between pixel rows). The class handles the stride;
+// direct blits should use rowAddr()/rowStride().
 //
 // The rainbow fields are redrawn in full every frame and timed, like the
 // full-screen benchmark in 04_720x480_test. Overwriting a single buffer
@@ -31,6 +31,10 @@ DVHSTX8Turbo display(DVHSTX_PINOUT_DEFAULT);
 // Feather RP2350: DVHSTX8Turbo display(ADAFRUIT_FEATHER_RP2350_CFG);
 // 640x480 instead: DVHSTX8Turbo display(DVHSTX_PINOUT_DEFAULT,
 //                                       DVHSTX_RESOLUTION_640x480);
+// Experimental anamorphic HDMI mode (may help TVs that don't scale
+// 720x480 properly; ~8KB more RAM; leave off for pure DVI monitors):
+// DVHSTX8Turbo display(DVHSTX_PINOUT_DEFAULT, DVHSTX_RESOLUTION_720x480,
+//                      true);
 
 // Layout (rows):
 //   0-38    status panel, 3 text lines
